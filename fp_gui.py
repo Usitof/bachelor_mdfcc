@@ -83,6 +83,7 @@ def default_config() :
         'maxia_list' : "0, 100",
 
         'fp_calc_mode' : False, # footprint calculation mode, False = mode1, True = mode2
+        'fp_compare': False, # comparision mode, False = single footprint, True = two footprints
         'acc' : 0.01,       # i.e. ~1% -- or 1000 m (built-in)
         'angle_step' : 5,   # footprint angle, degrees
         #'angle_step_mode2' : 0.5, # mode 2 footprint angle, degrees
@@ -148,6 +149,7 @@ def set_config() :
     maxia_list_var.set(program_config['maxia_list'])
 
     fp_calc_mode_var.set(program_config['fp_calc_mode'])
+    fp_compare_var.set(program_config['fp_compare'])
     acc_var.set(program_config['acc'])
     angle_step_var.set(program_config['angle_step'])
     #angle_step_mode2_var.set(program_config['angle_step_mode2'])
@@ -253,6 +255,7 @@ def save_program_config() :
         'maxia_list' : maxia_list_var.get(),
         
         'fp_calc_mode' : fp_calc_mode_var.get(),
+        'fp_compare' : fp_compare_var.get(),
         'acc' : acc_var.get(),
         'angle_step' : angle_step_var.get(),
         #'angle_step_mode2' : angle_step_mode2_var.get(),
@@ -655,6 +658,23 @@ def swap_eng_mode() :
         ent_eng_mode.insert(0, 'Shoot Once')
     ent_eng_mode.config(state='readonly')
 
+def swap_compare() :
+    compare = fp_compare_var.get()
+    compare = not compare
+    fp_compare_var.set(compare)
+    ent_compare.config(state='normal')
+    ent_compare.delete(0, END)
+    if compare:
+        ent_compare.insert(0, 'Comparison Active')
+    else :
+        ent_compare.insert(0, 'Single Footprint')
+        
+    try :
+        if probing_win.state() == "normal" : probing_win.destroy()
+    except :
+        pass
+
+    ent_compare.config(state='readonly')
 
 def swap_fp_calc_mode() :
     mode2 = fp_calc_mode_var.get()
@@ -2147,6 +2167,7 @@ def gui_footprint() :
     m_type = mtype_var.get()
     i_type = itype_var.get()
     mode2 = fp_calc_mode_var.get()
+    compare = fp_compare_var.get()
     emode_sls = emode_var.get()
     angle_step = angle_step_var.get()
     #angle_step_mode2 = angle_step_mode2_var.get()
@@ -2314,18 +2335,167 @@ def gui_footprint() :
                 chart_info_str = chart_info_str.format(h_int_min/1000, maxia/1000, t_int_lnc, angle_step, fcc_constants.sat_delay, h_discr/1000, search_type)
             data_fname = footprint_path + "/footprint_m{}_i{}_{}{}.json".format(m_type, i_type, save_label, t_stamp)
             
+def gui_footprint() :
+    m_type = mtype_var.get()
+    i_type = itype_var.get()
+    mode2 = fp_calc_mode_var.get()
+    compare = fp_compare_var.get()  # Holt den Zustand aus Ihrer GUI-Checkbox
+    emode_sls = emode_var.get()
+    angle_step = angle_step_var.get()
+    #angle_step_mode2 = angle_step_mode2_var.get()
+    num_steps_mode2 = num_steps_mode2_var.get()
+    acc = acc_var.get()
+    h_int_min = mia_var.get()
+    h_discr = h_discr_var.get()
+    t_delay = t_delay_var.get()
+    plot_hit_charts = plot_hit_charts_var.get()
+    hit_chart_angle = hit_chart_angle_var.get()
+
+    if set_time_stamp_var.get() : 
+        r_now = datetime.now()
+        t_stamp = "-" + r_now.strftime("%y%m%d-%H%M")
+    else :
+        t_stamp = ''
+ 
+    if mode2 :
+        print("\nFootprint calculation mode2 routine started. Missile type m{}, Interceptor type i{}".format(m_type, i_type))
+    else :
+        print("\nFootprint calculation routine started. Missile type m{}, Interceptor type i{}".format(m_type, i_type))
+    print("Missile type m{} trajectory calculating...".format(m_type))
+
+    if stdout_to_file_var.get() :  
+        file_name = 'footprint_m{}_i{}{}.txt'.format(m_type, i_type, t_stamp)
+        if set_keep_stdout_file_var.get() :
+            m.keep_old_file(file_name)
+        original = sys.stdout
+        sys.stdout = open(file_name, 'w')
+
+    missile_data = rd.missile(m_type, rd_fname)
+    trj = bm.balmisflight(missile_data)
+    mrange = trj[len(trj) - 1, 2] * R_e
+    print("\rMissile type m{} trajectory calculated, missile range={:.0f} km".format(m_type, mrange/1000))
+    
+    if mrange > bm_range_limit :
+        print("STOP: Missile range is too long for footprint calculation. The limit is {} km".format(bm_range_limit/1000))
+        return False
+
+    dist = mrange * dist_param 
+
+    n_stages = len(missile_data["t_bu"])
+    burn_time = sum(missile_data["t_bu"]) + sum(missile_data["t_delay"]) - missile_data["t_delay"][n_stages - 1]
+    t_int_lnc = burn_time + t_delay 
+    
+    det_range = 0.0
+    interceptor_data = rd.interceptor(i_type, rd_fname)
+            
+    if "det_range" in interceptor_data.keys() : 
+        if len(interceptor_data["det_range"]) > m_type :
+            det_range = interceptor_data["det_range"][m_type] 
+        else :
+            print("No detection range value found for this missile. Detection range is set to 0.")
+    else :
+        print("No detection range values set in the interceptor data. Detection range set to 0.")
+
+    if det_range < 11000 : 
+         det_range *= 1000
+    if h_discr < 1000 : 
+        h_discr *= 1000
+    if h_int_min < 500 : 
+        h_int_min *= 1000
+
+    mpia = interceptor_data['mpia']
+    mpia *= 1000
+    h_int_min = max(h_int_min, mpia)
+
+    maxia = interceptor_data['maxia']
+    maxia *= 1000
+
+    fp_st = time.time()
+    
+    op_range = interceptor_data['op_range']
+    if op_range < 2000 :
+        op_range *= 1000
+    if op_range :
+        print(">Interceptor's operational range {:.0f} km".format(op_range/1000))
+    else :
+        print(">Interceptor's operational range is not set.")        
+
+
+    int_table = m.load_int_table(i_type, fcc_constants.psi_step, beta_step, rd_fname, t_stamp, set_keep_int_tables_var.get(), concentric=False)                
+    
+    if compare:
+        int_table_con = m.load_int_table(i_type, fcc_constants.psi_step, beta_step, rd_fname, t_stamp, set_keep_int_tables_var.get(), concentric=True)
+
+    search_func = ss.short_search
+    search_type = "Shoot_Once"
+    save_label = "son"
+
+    if emode_sls :
+        search_func = ss.sls_search
+        search_type = "Shoot_Look_Shoot"
+        save_label = "sls"
+        
+    print("Type of interception: " + search_type)
+
+    if not mode2 :
+        # 1. angle-elevation
+        footprint_tab = fp.footprint_calc_v2(search_func, trj, int_table, h_int_min, maxia, t_int_lnc, angle_step, op_range, det_range, t_delay, h_discr, acc, dist, plot_hit_charts, hit_chart_angle, m_type, i_type)
+        
+        # 2. concentric footprint
+        if compare:
+            print("Calculating Concentric Footprint for Comparison...")
+            footprint_tab_con = fp.footprint_calc_v2(search_func, trj, int_table_con, h_int_min, maxia, t_int_lnc, angle_step, op_range, det_range, t_delay, h_discr, acc, dist, plot_hit_charts, hit_chart_angle, m_type, i_type)
+    else :
+        if emode_sls :
+            search_func = ss.sls_search2
+        else :
+            search_func = ss.short_search2
+
+        # 1. angle-elevation footprint mode 2
+        footprint_tab2 = ss.footprint_mode2(search_func, trj, int_table, h_int_min, maxia, t_int_lnc, angle_step_mode2, op_range, det_range, t_delay, h_discr, acc, num_steps_mode2, plot_hit_charts, hit_chart_angle, m_type, i_type)
+        footprint_tab = footprint_tab2[0]
+        
+        # 2. concentric footprint mode 2
+        if compare:
+            print("Calculating Concentric Footprint Mode 2 for Comparison...")
+            footprint_tab2_con = ss.footprint_mode2(search_func, trj, int_table_con, h_int_min, maxia, t_int_lnc, angle_step_mode2, op_range, det_range, t_delay, h_discr, acc, num_steps_mode2, plot_hit_charts, hit_chart_angle, m_type, i_type)
+            footprint_tab_con = footprint_tab2_con[0]
+
+    if np.any(footprint_tab) :
+        if compare:
+            label_arr = ['Angle-Elevation', 'Concentric']
+            bw = False
+            save_label += "_compare"
+        else:
+            label_arr = ['']
+            bw = True  
+
+        if not mode2 :
+            if det_range :
+                header_str = "angle, distance, acc_prm, x, y, m_type={} i_type={} min_ia={} maxia={} t_int_lnc={} angle_step={} det_range={} km t_delay={} h_discr={} {}"
+                header_str = header_str.format(m_type, i_type, h_int_min/1000, maxia/1000, t_int_lnc, angle_step, det_range/1000, t_delay, h_discr/1000, search_type)
+                chart_info_str = "min_ia={} maxia={} t_int_lnc={} angle_step={} det_range={} km t_delay={} h_discr={} {}"
+                chart_info_str = chart_info_str.format(h_int_min/1000, maxia/1000, t_int_lnc, angle_step, det_range/1000, t_delay, h_discr/1000, search_type)
+            else :
+                header_str = "angle, distance, acc_prm, x, y, m_type={} i_type={} min_ia={} maxia={} t_int_lnc={} angle_step={} sat_delay={} h_discr={} {}"
+                header_str = header_str.format(m_type, i_type, h_int_min/1000, maxia/1000, t_int_lnc, angle_step, fcc_constants.sat_delay, h_discr/1000, search_type)
+                chart_info_str = "min_ia={} maxia={} t_int_lnc={} angle_step={} sat_delay={} h_discr={} {}"
+                chart_info_str = chart_info_str.format(h_int_min/1000, maxia/1000, t_int_lnc, angle_step, fcc_constants.sat_delay, h_discr/1000, search_type)
+            
+            data_fname = footprint_path + "/footprint_m{}_i{}_{}{}.json".format(m_type, i_type, save_label, t_stamp)
+            
             if op_range :
                 title_str = "Footprint: i_type={} op_range={:.0f} km m_type={} mrange={:.0f} km".format(i_type, op_range/1000, m_type, mrange/1000)
             else :
                 title_str = "Footprint: i_type={} m_type={} mrange={:.0f} km".format(i_type, m_type, mrange/1000)
+            
             chart_fname = footprint_path + "/footprint_m{}_i{}_{}{}.png".format(m_type, i_type, save_label, t_stamp)
     
-            bw = True
-            label_arr = ['']
+            # if need to compare, send both tab to be plotted
+            plots_to_render = [footprint_tab, footprint_tab_con] if compare else [footprint_tab]
+            gui_fpchart_n(plots_to_render, label_arr, chart_info_str, title_str, chart_fname, header_str, mrange, data_fname, False, bw)
 
-            gui_fpchart_n([footprint_tab], label_arr, chart_info_str, title_str, chart_fname, header_str, mrange, data_fname, False, bw) # mode2 = False
-
-        else :
+        else :  # mode 2
             if det_range :
                 header_str = "Mode2: omega, shift, acc_prm, x, y, m_type={} i_type={} min_ia={} maxia={} t_int_lnc={} num_steps2={} det_range={} km t_delay={} h_discr={} {}"
                 header_str = header_str.format(m_type, i_type, h_int_min/1000, maxia/1000, t_int_lnc, num_steps_mode2, det_range/1000, t_delay, h_discr/1000, search_type)
@@ -2336,18 +2506,17 @@ def gui_footprint() :
                 header_str = header_str.format(m_type, i_type, h_int_min/1000, maxia/1000, t_int_lnc, num_steps_mode2, fcc_constants.sat_delay, h_discr/1000, search_type)
                 chart_info_str = "min_ia={} maxia={} t_int_lnc={} num_steps2={} sat_delay {} h_discr={} {}"
                 chart_info_str = chart_info_str.format(h_int_min/1000, maxia/1000, t_int_lnc, num_steps_mode2, fcc_constants.sat_delay, h_discr/1000, search_type)
+            
             data_fname = footprint_path + "/footprint_mode2_m{}_i{}_{}{}.json".format(m_type, i_type, save_label, t_stamp)
             if op_range :
                 title_str = "Footprint Mode2: i_type={} op_range={:.0f} km m_type={} mrange={:.0f} km".format(i_type, op_range/1000, m_type, mrange/1000)
             else :
                 title_str = "Footprint Mode2: i_type={} m_type={} mrange={:.0f} km".format(i_type, m_type, mrange/1000)
+            
             chart_fname = footprint_path + "/footprint_mode2_m{}_i{}_{}{}.png".format(m_type, i_type, save_label, t_stamp)
     
-            bw = True
-            label_arr = ['']
-
-            gui_fpchart_n([footprint_tab2], label_arr, chart_info_str, title_str, chart_fname, header_str, mrange, data_fname, True, bw) # mode2 = True
-                
+            plots_to_render = [footprint_tab2, footprint_tab2_con] if compare else [footprint_tab2]
+            gui_fpchart_n(plots_to_render, label_arr, chart_info_str, title_str, chart_fname, header_str, mrange, data_fname, True, bw)
 
     fp_et = time.time()
     fp_elapsed_time = fp_et - fp_st
@@ -2357,11 +2526,10 @@ def gui_footprint() :
         sys.stdout = original
         
     if mode2 :
-        return footprint_tab2
+        return (footprint_tab2, footprint_tab2_con) if compare else footprint_tab2
     else :
-        return footprint_tab
-        
-""" END of gui_footprint """
+        return (footprint_tab, footprint_tab_con) if compare else footprint_tab
+
 
 
 def gui_double_footprint() :
@@ -2369,6 +2537,7 @@ def gui_double_footprint() :
     m_type = mtype_var.get()
     i_type = itype_var.get()
     mode2 = fp_calc_mode_var.get()
+    compare = fp_compare_var.get()
     #emode_sls = emode_var.get()
     angle_step = angle_step_var.get()
     #angle_step_mode2 = angle_step_mode2_var.get()
@@ -2662,6 +2831,7 @@ def run_multi_detrange_footprint() : # actual routine, for window shell see gui_
     h_discr = h_discr_var.get()
     t_delay = t_delay_var.get()
     mode2 = fp_calc_mode_var.get()
+    compare = fp_compare_var.get()
     num_steps_mode2 = num_steps_mode2_var.get()
     ndr_fp_win.destroy()
     #m.run_n_footprint(m_key, i_key, detrange_list, rd_fname, emode, f_mia, a_stp, delay, hdisc, f_acc)
@@ -2957,6 +3127,7 @@ def run_param_footprint(par_key, par_list_string) : # actual routine, for window
     h_discr = h_discr_var.get()
     t_delay = t_delay_var.get()
     mode2 = fp_calc_mode_var.get()
+    compare = fp_compare_var.get()
     num_steps_mode2 = num_steps_mode2_var.get()
     
     npar_fprint_win.destroy()
@@ -3372,6 +3543,7 @@ def run_multi_interceptor_footprint() : # actual routine, for window shell see g
     t_delay = t_delay_var.get()
     muin_fprint_win.destroy()
     mode2 = fp_calc_mode_var.get()
+    compare = fp_compare_var.get()
     num_steps_mode2 = num_steps_mode2_var.get()
     #m.run_n_footprint(m_key, i_key, detrange_list, rd_fname, emode, f_mia, a_stp, delay, hdisc, f_acc)
     
@@ -3658,6 +3830,7 @@ def run_multi_missile_footprint() : # actual routine, for window shell see gui_m
     t_delay = t_delay_var.get()
     mumi_fprint_win.destroy()
     mode2 = fp_calc_mode_var.get()
+    compare = fp_compare_var.get()
     num_steps_mode2 = num_steps_mode2_var.get()
     #m.run_n_footprint(m_key, i_key, detrange_list, rd_fname, emode, f_mia, a_stp, delay, hdisc, f_acc)
     
@@ -4129,6 +4302,7 @@ def run_probing() :
     itype = itype_var.get()
 
     mode2 = fp_calc_mode_var.get()
+    compare = fp_compare_var.get()
     emode_sls = emode_var.get()
     angle_step = angle_step_var.get()
     acc = acc_var.get()
@@ -4487,6 +4661,7 @@ def gui_probing() : # routine's window shell, for actual routine see run_probing
         """
         
         mode2 = fp_calc_mode_var.get()
+        compare = fp_compare_var.get() 
         
         if not mode2 :
 
@@ -4506,9 +4681,8 @@ def gui_probing() : # routine's window shell, for actual routine see run_probing
             btn_show_ftprint_probe   = Checkbutton(probing_win, variable=show_ftprint_probe_var)
 
             btn_save_config = Button(probing_win, text="Save Config", command=save_program_config)
-            btn_run_probing = Button(probing_win, text="Compute", command=lambda: call_longrun(run_probing)) # start_probing)
-            #btn_run_probing2 = Button(probing_win, text="Compute Mode2", command=start_probing2)
-            #btn_stop_probing = Button(probing_win, text="Stop", command=stop_probing, state='disabled')
+            
+            btn_run_probing = Button(probing_win, text="Compute", command=lambda: call_longrun(lambda: run_probing(compare=fp_compare_var.get())))
             
             lbl_sect_angle_beg.grid(row=0, column=0, sticky='w')
             ent_sect_angle_beg.grid(row=0, column=1)
@@ -4537,7 +4711,8 @@ def gui_probing() : # routine's window shell, for actual routine see run_probing
             btn_show_ftprint_probe   = Checkbutton(probing_win, variable=show_ftprint_probe_var)
 
             btn_save_config = Button(probing_win, text="Save Config", command=save_program_config)
-            btn_run_probing = Button(probing_win, text="Compute", command=lambda: call_longrun(run_probing)) # start_probing)
+            
+            btn_run_probing = Button(probing_win, text="Compute", command=lambda: call_longrun(lambda: run_probing(compare=fp_compare_var.get())))
 
             lbl_sect_angle_step.grid(row=0, column=0, sticky='w')
             ent_sect_angle_step.grid(row=0, column=1)
@@ -4549,6 +4724,7 @@ def gui_probing() : # routine's window shell, for actual routine see run_probing
             
             btn_save_config.grid(row=3, column=0, columnspan=2, ipady=1, sticky='ew')
             btn_run_probing.grid(row=4, column=0, columnspan=2, ipady=1, sticky='ew')
+
 
         #btn_run_probing2.grid(row=7, column=0, columnspan=2, ipady=1, sticky='ew')
         #btn_stop_probing.grid(row=5, column=1, ipady=1, sticky='ew')
@@ -4579,13 +4755,28 @@ def gui_interception_table() :
 
     it_st = time.time()
     print("x psi_step=", fcc_constants.psi_step)
-    m.run_interceptor_table( i_key, rd_fname, fcc_constants.psi_step, set_keep_int_tables_var.get())
+    print("Compare Mode =", fp_compare_var.get())
+
+    if fp_compare_var.get() == True:
+        print("\n Starting Angle-Elevation Table Calculation (Compare Mode)")
+        # anlge-elevation calculation of table
+        m.run_interceptor_table(i_key, rd_fname, fcc_constants.psi_step, set_keep_int_tables_var.get(), concentric=False)
+        m.run_interception_table(i_key, rd_fname, fcc_constants.psi_step, beta_step, set_keep_int_tables_var.get(), set_int_table_samp_verify_var.get(), concentric=False)
+        
+        print("\n Starting Concentric Table Calculation (Compare Mode)")
+        # concentric calculation of table
+        m.run_interceptor_table(i_key, rd_fname, fcc_constants.psi_step, set_keep_int_tables_var.get(), concentric=True)
+        m.run_interception_table(i_key, rd_fname, fcc_constants.psi_step, beta_step, set_keep_int_tables_var.get(), set_int_table_samp_verify_var.get(), concentric=True)
+        
+    else:
+        # default case: only anlge-elevation shell 
+        m.run_interceptor_table(i_key, rd_fname, fcc_constants.psi_step, set_keep_int_tables_var.get())
+        m.run_interception_table(i_key, rd_fname, fcc_constants.psi_step, beta_step, set_keep_int_tables_var.get(), set_int_table_samp_verify_var.get())
 
     it_et = time.time()
     it_elapsed_time = it_et - it_st
     print("Interceptor table calculation time = {:.3f}s".format(it_elapsed_time))
 
-    m.run_interception_table(i_key, rd_fname, fcc_constants.psi_step, beta_step, set_keep_int_tables_var.get(), set_int_table_samp_verify_var.get())
 
 def missile_editor() :
     rocket_editor(True)
@@ -5219,6 +5410,7 @@ if __name__ == '__main__':
     maxia_list_var = StringVar(root, value = program_config['maxia_list'])
     
     fp_calc_mode_var = BooleanVar(root, value = program_config['fp_calc_mode'])
+    fp_compare_var = BooleanVar(root, value = program_config['fp_compare'])
     acc_var = DoubleVar(root, value = program_config['acc'])
     angle_step_var = DoubleVar(root, value = program_config['angle_step']) # was IntVar originally
     #angle_step_mode2_var = DoubleVar(root, value = program_config['angle_step_mode2'])
@@ -5480,6 +5672,7 @@ if __name__ == '__main__':
     
     lbl_fp_calc_mode = Label(frame_fc, text="Footprint Calculation Mode")
     lbl_eng_mode = Label(frame_fc, text="Type of Interception")
+    lbl_compare = Label(frame_fc, text="Concentric Shell vs. Elevation-Angle Shell")
     lbl_ang_step = Label(frame_fc, text="Mode 1 Footprint angle step, degrees")
     lbl_num_steps_mode2 = Label(frame_fc, text="Mode 2 Footprint number of steps")
     #lbl_ang_step_mode2 = Label(frame_fc, text="Mode 2 Footprint Angle Step, degrees")
@@ -5497,6 +5690,12 @@ if __name__ == '__main__':
     else :
         ent_eng_mode.insert(0, 'Shoot Once')
     
+    ent_compare = Entry(frame_fc, width=20) #, readonlybackground='white')
+    if fp_compare_var.get() :
+        ent_compare.insert(0, 'Comparison Active')
+    else :
+        ent_compare.insert(0, 'Single Footprint')
+
     ent_ang_step = CEntry(frame_fc, textvariable=angle_step_var,)# width=20)
     #ent_ang_step_mode2 = Entry(frame_fc, textvariable=angle_step_mode2_var,)# width=20)
     ent_num_steps_mode2 = CEntry(frame_fc, textvariable=num_steps_mode2_var,)# width=20)
@@ -5506,25 +5705,29 @@ if __name__ == '__main__':
     
     btn_fp_calc_mode = Button(frame_fc, text="Swap", command=swap_fp_calc_mode)
     btn_eng_mode = Button(frame_fc, text="Swap", command=swap_eng_mode)
+    btn_compare = Button(frame_fc, text="Swap", command=swap_compare)
     #btn_ang_step = Button(frame_fc, text="Enter", command=set_angle_step)
     #btn_accuracy = Button(frame_fc, text="Enter", command=set_acc)
     
     lbl_fp_calc_mode.grid(row=0, column=0, sticky='w')
     lbl_eng_mode.grid(row=1, column=0, sticky='w')
-    lbl_ang_step.grid(row=2, column=0, sticky='w')
+    lbl_compare.grid(row=2, column=0, sticky='w')
+    lbl_ang_step.grid(row=3, column=0, sticky='w')
     #lbl_ang_step_mode2.grid(row=3, column=0, sticky='w')
-    lbl_num_steps_mode2.grid(row=2, column=0, sticky='w')
-    lbl_accuracy.grid(row=3, column=0, sticky='w')
+    lbl_num_steps_mode2.grid(row=3, column=0, sticky='w')
+    lbl_accuracy.grid(row=4, column=0, sticky='w')
     
     
     ent_fp_calc_mode.configure(state='readonly')
     ent_fp_calc_mode.grid(row=0, column=1, sticky='ew')
     ent_eng_mode.configure(state='readonly')
     ent_eng_mode.grid(row=1, column=1, sticky='ew')
-    ent_ang_step.grid(row=2, column=1, columnspan=2, sticky='ew')
+    ent_compare.configure(state='readonly')
+    ent_compare.grid(row=2, column=1, sticky='ew')
+    ent_ang_step.grid(row=3, column=1, columnspan=2, sticky='ew')
     #ent_ang_step_mode2.grid(row=3, column=1, columnspan=2, sticky='ew')
-    ent_num_steps_mode2.grid(row=2, column=1, columnspan=2, sticky='ew')
-    ent_accuracy.grid(row=3, column=1, columnspan=2, sticky='ew')
+    ent_num_steps_mode2.grid(row=3, column=1, columnspan=2, sticky='ew')
+    ent_accuracy.grid(row=4, column=1, columnspan=2, sticky='ew')
     
     if fp_calc_mode_var.get() :
         lbl_ang_step.grid_remove()
@@ -5538,6 +5741,7 @@ if __name__ == '__main__':
     
     btn_fp_calc_mode.grid(row=0, column=2, sticky='e', ipady=1)
     btn_eng_mode.grid(row=1, column=2, sticky='e', ipady=1)
+    btn_compare.grid(row=2, column=2, sticky='e', ipady=1)
     #btn_ang_step.grid(row=1, column=2, sticky='e')
     #btn_accuracy.grid(row=2, column=2, sticky='e')
     

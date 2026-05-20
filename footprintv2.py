@@ -6,7 +6,8 @@ import matplotlib.pyplot as plt
 import balmis as bm   
 import rocket_data as rd
 import main as m 
-import tables_v2b as tb
+import tables_v2b_0 as tb
+import tables_v2b_a as tb_con
 from fcc_constants import R_e, eps, angle_eps, beta_step, fill_ang, mrl_factor1, mrl_factor2, out_time_freq
 import fcc_constants
 from os import cpu_count
@@ -764,8 +765,21 @@ def plot_hit(hit_info,
     else :
         tar_trj = bm.trj_shift_turn(trj_0, R_e, dist, radians(d_angle)) # in mode2: dist_opt is shift, fi_opt is omega
     #hit = [psi_hit, t_hit_i, r_hit, beta_hit, psi1, i1t, r1, psi2, i2t, r2], [t_hit_m, r_hit, beta_hit, r_hit * cos(beta_hit), r_hit * sin(beta_hit)]
+    # 1. data for angle-elevation shell (tb)
     mis_traj = tb.mis_traj_sample(tar_trj)
     
+    mtime = mis_traj[:, 0]
+    mrad  = mis_traj[:, 1] / 1000  
+    mbeta = np.degrees(mis_traj[:, 2]) 
+    
+    # 2. data for contentric shell (tb_con)
+    mis_traj_con = tb_con.mis_traj_sample(tar_trj)
+    
+    mcon_time = mis_traj_con[:, 0]
+    mcon_rad  = mis_traj_con[:, 1] / 1000
+    mcon_beta = np.degrees(mis_traj_con[:, 2])
+    
+    # --- Ihr bestehender Code zur Vorbereitung der anderen Variablen ---
     m_range_km = trj_0[len(trj_0) - 1, 2] * R_e / 1000
     m_flight_time = trj_0[len(trj_0) - 1, 0]
     
@@ -773,48 +787,34 @@ def plot_hit(hit_info,
     m_beta_land = tar_trj[len(tar_trj) - 1, 4]
     m_beta_min = degrees(min(m_beta_launch, m_beta_land))
 
-    rad  = tar_trj[:, 3]
-    rad  = rad / 1000
-    beta = tar_trj[:, 4]
-    for i in range(len(beta)) :
-        beta[i] = degrees(beta[i])
+    rad  = tar_trj[:, 3] / 1000
+    beta = np.degrees(tar_trj[:, 4])
     time = tar_trj[:, 0]
-    alti = trj_0[:, 1]
-    alti = alti - R_e
-    alti = alti / 1000
-    
-    mtime = mis_traj[:, 0]
-    mrad  = mis_traj[:, 1]
-    mbeta = mis_traj[:, 2]
-    mrad  = mrad / 1000
-    for i in range(len(mbeta)) :
-        mbeta[i] = degrees(mbeta[i])
-    
-    
-    #it = 714
-    #print("itime[{0}]={1:.2f}, irad[{0}]={2:.2f}, ibeta[{0}]={3:.2f}".format(it, itime[it], irad[it], ibeta[it]))
+    alti = (trj_0[:, 1] - R_e) / 1000
 
     fig = plt.figure()
     ax1 = fig.add_subplot(111)
     ax12 = ax1.twinx()
  
-
     ax1.plot(time, beta, c='blue', linestyle='-', label='m_beta')
     ax1.plot(itime, ibeta, c='green', linestyle='-', linewidth=.75, label='i_beta')
-    #ax1.plot(itime1, ibeta1, c='g', linewidth=.5, linestyle=':', label='i_beta1')
-    #ax1.plot(itime2, ibeta2, c='g', linewidth=.5, linestyle='-.', label='i_beta2')
-    #ax1.plot(mtime, mbeta, c='b', linewidth=.75, linestyle='--', label='ms_beta')
+    
+    # new: both mis_traj betas plot (tb = blue, tb_con = red)
+    ax1.plot(mtime, mbeta, c='blue', linewidth=1.2, linestyle='--', label='ms_beta (tb)')
+    ax1.plot(mcon_time, mcon_beta, c='red', linewidth=1.2, linestyle='--', label='ms_beta (tb_con)')
+    
     ax1.plot(0, 0, marker=2, ms=5, mfc='k', mec='k') 
 
-    ax12.plot(time,   rad, c='blue', linestyle='--', label='m_rad')
-    ax12.plot(itime, irad, c='green', linestyle='--', linewidth=.75, label='i_rad')
-    #ax12.plot(itime1, irad1, c='m', linewidth=.5, linestyle=':', label='i_rad1')
-    #ax12.plot(itime2, irad2, c='m', linewidth=.5, linestyle='-.', label='i_rad2')
-    #ax12.plot(mtime, mrad, c='r', linewidth=.75, linestyle='--', label='ms_rad')
-    ax12.plot(time, alti, c='blue', linestyle='-.', label='m_alti')
-    ax12.plot(itime, ialti, c='green', linestyle='-.', linewidth=.75, label='i_alti')
+    ax12.plot(time, rad, c='blue', linestyle='-.', label='m_rad')
+    ax12.plot(itime, irad, c='green', linestyle='-.', linewidth=.75, label='i_rad')
+    ax12.plot(time, alti, c='cyan', linestyle=':', label='m_alti')
+    ax12.plot(itime, ialti, c='lightgreen', linestyle=':', linewidth=.75, label='i_alti')
+    
+    # neu: both mis_traj plots (tb = blue, tb_con = red)
+    ax12.plot(mtime, mrad, c='blue', linewidth=1.2, linestyle=':', label='ms_rad (tb)')
+    ax12.plot(mcon_time, mcon_rad, c='red', linewidth=1.2, linestyle=':', label='ms_rad (tb_con)')
 
-
+    # --- Ihr verbleibender Code für Achsen, Overlays und Speichern ---
     ax1.axvline(x = hit_m[0], color = 'purple', linewidth=1, linestyle=':', label = 'interception time {:.2f}'.format(hit_m[0]))
     ax1.axvline(x = i_lnc_time, color = 'orange', linewidth=1, linestyle=':', label = 'interceptor launch time {:.2f}'.format(i_lnc_time))
     ax1.axvline(x = burn_time, color = 'red', linewidth=1, linestyle=':', label = 'missile burn time={}'.format(burn_time))
@@ -841,12 +841,11 @@ def plot_hit(hit_info,
         ax1.set_title("Interception Chart (beta and rad vs time)\n mtype={} itype={} angle={:.1f} dist={:.1f} psi={:.2f}".format(m_type, i_type, d_angle, dist/1000, hit_i[0]), va='bottom')
     else :
         ax1.set_title("Interception Chart (beta and rad vs time)\n mtype={} itype={} angle={:.1f} shift={:.1f} psi={:.2f}".format(m_type, i_type, d_angle, dist/1000, hit_i[0]), va='bottom')
-    #ax1.grid()
     
     m.keep_old_file(chart_fname)
-    #print("ok1")
     fig.savefig(chart_fname, dpi=300, bbox_inches='tight', pad_inches=0.2)
     plt.close()
+
     
 """End of plot_hit() """
     

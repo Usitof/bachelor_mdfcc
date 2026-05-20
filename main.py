@@ -9,7 +9,8 @@ from math import degrees, ceil
 
 import balmis as bm
 import rocket_data as rd
-import tables_v2b as tb
+import tables_v2b_0 as tb
+import tables_v2b_a as tb_con
 import short_search as ss
 import footprintv2 as fp
 
@@ -200,29 +201,32 @@ def run_balmis_range_vs_gth_list() :
     missile_data = rd.missile(mtype)
     bm.balmis_range_vs_gth_list(missile_data) # gt_height range is optional
 
-def run_interceptor_table(itype, f_name='', psi_step=0.25, keep_int_tables=set_keep_int_tables) : # time-consuming; not to be confused with interceptION_table
+def run_interceptor_table(itype, f_name='', psi_step=0.25, 
+                           keep_int_tables=set_keep_int_tables,
+                           concentric=False) :
     """ This is building a set of interceptor trajectories with launch angle from 90 (from vertical)   """
     """ to 0 (not including 0) with a (default) step of 0.25 grad. This is the most time-consuming     """
     """ procedure, therefore save the result in a binary file to be used for further calculations      """
     
     ind_flight_dataprint = False
 
-    #itype = set_itype
     interceptor_data = rd.interceptor(itype, f_name)
     
+    suffix = "_con" if concentric else ""
+    tb_module = tb_con if concentric else tb
+    
     if stdout_to_file :
-        file_name = int_table_path + '/int_table_i{}{}.txt'.format(itype, t_stamp)
+        file_name = int_table_path + '/int_table_i{}{}{}.txt'.format(itype, suffix, t_stamp)
         if set_keep_stdout_file :
             keep_old_file(file_name)
         original = sys.stdout
         sys.stdout = open(file_name, 'w')
 
-    #interc_table = np.empty([1,0,6])
-    interc_table = tb.interceptor_table(interceptor_data, ind_flight_dataprint, psi_step)
+    interc_table = tb_module.interceptor_table(interceptor_data, ind_flight_dataprint, psi_step)
     config_data = [psi_step, R_e, fcc_constants.no_atmosphere]
     interc_data = np.array([interceptor_data, config_data, interc_table], dtype=object)
 
-    file_nw = int_table_path + '/int_table_i{}{}.npy'.format(itype, t_stamp)
+    file_nw = int_table_path + '/int_table_i{}{}{}.npy'.format(itype, suffix, t_stamp)
     if keep_int_tables :
         keep_old_file(file_nw)
         with open(file_nw, 'wb') as intab_f:
@@ -234,106 +238,79 @@ def run_interceptor_table(itype, f_name='', psi_step=0.25, keep_int_tables=set_k
         
     return interc_data
 
-def run_interception_table(i_type, rd_fname='', psi_step=0.25, beta_step=0.1, keep_int_tables=set_keep_int_tables, int_table_samp_verify=set_int_table_samp_verify) : # fast; not to be confused with interceptOR_table
+
+def run_interception_table(i_type, rd_fname='', psi_step=0.25, beta_step=0.1, 
+                           keep_int_tables=set_keep_int_tables, 
+                           int_table_samp_verify=set_int_table_samp_verify,
+                           concentric = False) : # new: concentric Parameter
     """ Sampling of the set of interceptor trajectories over "beta" flight path angle (from horizontal)  """
     """ starting from the lowest angle (negative) and up to 90 grad, with a (default) step of 0.25 (0.1) """
 
-    #itype = set_itype
     interceptor_data = rd.interceptor(i_type, rd_fname)
 
-    print("\nInterception (sampled) table building routine started...")
+    tb_module = tb_con if concentric else tb
+    suffix = "_con" if concentric else ""
+
+    print(f"\nInterception (sampled) table building routine started ({'Concentric' if concentric else 'Standard'})...")
 
     """ Name of the file with a saved set of interceptor trajectories """
-    file_nr = int_table_path + '/int_table_i{}.npy'.format(i_type)      
+    file_nr = int_table_path + '/int_table_i{}{}.npy'.format(i_type, suffix)      
     interc_data_good = False
     if path.exists(file_nr) :
         interc_data_good = True
-        with open(file_nr, 'rb') as intab_f: # load interceptor table
+        with open(file_nr, 'rb') as intab_f: 
             interc_data = np.load(intab_f, allow_pickle=True)
         if len(interc_data) == 3 :
-            #interceptor_data_r, psi_step_r, interc_table = interc_data
             interceptor_data_r, config_data_r, interc_table = interc_data
             if type(config_data_r) == float :
                 config_data_r = [config_data_r]
             psi_step_r = config_data_r[0]
-            #print("config_data_r = ", config_data_r)
-            #print("psi_step_r = ", psi_step_r)
-            if psi_step_r == psi_step : #check flight-related parameters
-                for key in ("cd_type",
-                            "m_st",
-                            "m_fu",
-                            "v_ex",
-                            "t_bu",
-                            "t_delay", #stage separation delay
-                            "a_mid",
-                            "m_shroud",
-                            "t_shroud",
-                            "m_pl",
-                            "a_nz",
-                            "c_bal",
-                            "traj_type",
-                            "vert_launch_height"#,                            "mpia"#,                             "op_range"
-                            ) :
-                    if key in interceptor_data_r : # older data may not contain a later added parameter
+            if psi_step_r == psi_step : 
+                for key in ("cd_type", "m_st", "m_fu", "v_ex", "t_bu", "t_delay", 
+                            "a_mid", "m_shroud", "t_shroud", "m_pl", "a_nz", 
+                            "c_bal", "traj_type", "vert_launch_height") :
+                    if key in interceptor_data_r : 
                         if interceptor_data_r[key] != interceptor_data[key] :
-                            print("R", key, interceptor_data_r[key], interceptor_data[key])
                             interc_data_good = False
-                            print("Interceptor data in file is not current, recalculating for current interceptor flight parameters.")
                             break
-                        # if interc
                     else :
-                        print("R", key, "not present in the file")
                         interc_data_good = False
-                        print("Interceptor data in file is not current, recalculating for current interceptor flight parameters.")
                         break
 
-                #for key
                 if len(config_data_r) == 3 :
                     R_e_r = config_data_r[1]
                     if R_e_r == R_e :
-                        if R_e != R_e0 : print("R_N = {:.3f}".format(R_e_r/R_e0))
                         r_no_atm = config_data_r[2]
-                        if r_no_atm == fcc_constants.no_atmosphere :
-                            pass
-                            #print("no_atmosphere={}".format(r_no_atm))
-                        else :
+                        if r_no_atm != fcc_constants.no_atmosphere :
                             interc_data_good = False
-                            print("Parameter \'no_atmosphere\' is not the same current: {} vs read: {}".format(fcc_constants.no_atmosphere, r_no_atm))
                     else :
                         interc_data_good = False
-                        print("Earth radius is not the same, current: {} vs read: {}".format(R_e/R_e0, R_e_r/R_e0))
                 else :
                     interc_data_good = False
-                    print("File " + file_nr + " contains incorrect number of data units, calculating new data")
-                        
             else :
                 interc_data_good = False
-                print("psi_step in file is not the same as set, recalculating for the set value")
 
             if interc_data_good :
                 print("The set of interceptor trajectories loaded from file " + file_nr)            
         else :
             interc_data_good = False
-            print("File " + file_nr + " contains incorrect number of data units, calculating new data")
     else :
-        print("No set of interceptor trajectories " + file_nr + " found.")
-        print("Calculating a new one...")
+        print(f"No set of interceptor trajectories {file_nr} found. Calculating a new one...")
 
     if not interc_data_good :
         if check_fpa :
-            print(">>>")
-            print("Set check_fpa=False and restart the program.")
-            print(">>>")
+            print(">>>\nSet check_fpa=False and restart the program.\n>>>")
             return False
 
-        interc_data = run_interceptor_table(i_type, rd_fname, psi_step, keep_int_tables)
+        interc_data = run_interceptor_table(i_type, rd_fname, psi_step, keep_int_tables, concentric=concentric)
         interceptor_data, config_data, interc_table = interc_data
  
-    int_table_v2_w = tb.interception_table(interceptor_data, interc_table, psi_step, beta_step)
+    # new: tb or tb_con
+    int_table_v2_w = tb_module.interception_table(interceptor_data, interc_table, psi_step, beta_step)
     config_data = [psi_step, beta_step, R_e, fcc_constants.no_atmosphere]
     interc_data_w = np.array([interceptor_data, config_data, int_table_v2_w], dtype=object)
 
-    file_nw = int_table_path + '/int_table_samp_i{}{}.npy'.format(i_type, t_stamp)
+    file_nw = int_table_path + '/int_table_samp_i{}{}{}.npy'.format(i_type, suffix, t_stamp)
     if keep_int_tables :
         keep_old_file(file_nw)
         
@@ -388,7 +365,10 @@ def run_interception_table(i_type, rd_fname='', psi_step=0.25, beta_step=0.1, ke
 
 """ END of run_interception_table """
 
-def load_int_table(t_itype, psi_step=0.25, beta_step=0.1, f_name='', t_tstamp='', keep_int_tables=set_keep_int_tables, int_table_samp_verify=set_int_table_samp_verify) :
+def load_int_table(t_itype, psi_step=0.25, beta_step=0.1, f_name='', t_tstamp='', 
+                   keep_int_tables=set_keep_int_tables, 
+                   int_table_samp_verify=set_int_table_samp_verify,
+                   concentric=False) : # NEU: concentric Parameter hinzugefügt
     """
     Loading sampled interception table from a file. If not found, load set of interceptor trajectories from a file,
     then calculate interception table. If the set is not found either, calculate a new one (time consuming). 
@@ -406,14 +386,15 @@ def load_int_table(t_itype, psi_step=0.25, beta_step=0.1, f_name='', t_tstamp=''
 
     interceptor_data = rd.interceptor(t_itype, f_name)
     
-    file_nr = int_table_path + '/int_table_samp_i{}.npy'.format(t_itype)
+    suffix = "_con" if concentric else ""
+    
+    file_nr = int_table_path + '/int_table_samp_i{}{}.npy'.format(t_itype, suffix)
     interc_data_good = False
     if path.exists(file_nr) :
         interc_data_good = True
         with open(file_nr, 'rb') as intab_f: # load sampled interceptor table
             interc_data_samp = np.load(intab_f, allow_pickle=True)
         if len(interc_data_samp) == 3 :
-            #interceptor_data_r, psi_step_r, beta_step_r, interc_table_samp = interc_data_samp
             interceptor_data_r, config_data_r, interc_table_samp = interc_data_samp
             psi_step_r, beta_step_r = config_data_r[0], config_data_r[1]
             if psi_step_r == psi_step :
@@ -431,38 +412,33 @@ def load_int_table(t_itype, psi_step=0.25, beta_step=0.1, f_name='', t_tstamp=''
                                 "a_nz",
                                 "c_bal",
                                 "vert_launch_height",
-                                "traj_type"#,                                "mpia" #,                                "op_range"
+                                "traj_type"
                                 ) :
-                        if key in interceptor_data_r : # older data may not contain a later added parameter
+                        if key in interceptor_data_r : 
                             if interceptor_data_r[key] != interceptor_data[key] :
                                 print("N", key, interceptor_data_r[key], interceptor_data[key])
                                 interc_data_good = False
                                 print("Interceptor data in file is not current, recalculating for current interceptor flight parameters.")
                                 break
-                            # if interc..
                         else :
                             print("N", key, "not present in the file")
                             interc_data_good = False
                             print("Interceptor data in file is not current, recalculating for current interceptor flight parameters.")
                             break
                             
-                    # for key #TODO if inter_data_good : check earth size, otherwise it's done regardless, same for R-table
                     if len(config_data_r) == 4 :
-                        #print("Ok load")
                         R_e_r = config_data_r[2]
                         if R_e_r == R_e :
                             if R_e != R_e0 : print("R_N = {:.3f}".format(R_e_r/R_e0))
                             r_no_atm = config_data_r[3]
                             if r_no_atm == fcc_constants.no_atmosphere :
                                 pass
-                                #print("no_atmosphere={}".format(r_no_atm))
                             else :
                                 interc_data_good = False
                                 print("Parameter \'no_atmosphere\' is not the same, current: {} vs read: {}".format(fcc_constants.no_atmosphere, r_no_atm))
                         else :
                             interc_data_good = False
                             print("Earth radius is not the same, current: {} vs read: {}".format(R_e/R_e0, R_e_r/R_e0))
-                    # if len...
                     else :
                         interc_data_good = False
                         print("File " + file_nr + " contains incorrect number of data units, calculating new data")
@@ -475,7 +451,7 @@ def load_int_table(t_itype, psi_step=0.25, beta_step=0.1, f_name='', t_tstamp=''
                 print("psi_step in file is not the same as current, recalculating for the current value")
 
             if interc_data_good :
-                print("Resampled table for interceptor type i{0} loaded from file int_table_samp_i{0}.npy".format(t_itype))
+                print("Resampled table for interceptor type i{0} loaded from file int_table_samp_i{0}{1}.npy".format(t_itype, suffix))
         else :
             interc_data_good = False
             print("File " + file_nr + " contains incorrect number of data units, calculating new data")
@@ -484,7 +460,7 @@ def load_int_table(t_itype, psi_step=0.25, beta_step=0.1, f_name='', t_tstamp=''
         print("Calculating a new one...")
 
     if not interc_data_good :
-        interc_data_samp = run_interception_table(t_itype, f_name, psi_step, beta_step, keep_int_tables, int_table_samp_verify)
+        interc_data_samp = run_interception_table(t_itype, f_name, psi_step, beta_step, keep_int_tables, int_table_samp_verify, concentric=concentric)
         if type(interc_data_samp) != bool :
             interc_table_samp = interc_data_samp[2]
         else :
