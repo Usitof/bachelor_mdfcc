@@ -8,7 +8,7 @@ import fcc_constants
 from fcc_constants import beta_step as set_beta_step, angle_eps, R_e, int_vl_height
 
 # =================================================================
-# TRANSFORMATION (SHELL METRIK)
+# transformation (shell metric)
 # =================================================================
 
 @nb.njit(cache=True, fastmath=True)
@@ -20,7 +20,6 @@ def _transform_point_full_logic(z_rad, z_ang, i_psi, is_exo):
         i_rad = h
         i_ang = pi/2 if is_exo else radians(90.0 - i_psi)
     else:
-        # Transformation ins erdzentrierte System (Theta/Beta)
         i_rad2 = R_e**2 + z_rad**2 - 2.0 * R_e * z_rad * cos(z_ang)
         i_rad = sqrt(max(0.0, i_rad2))
         arg = (z_rad * cos(z_ang) - R_e) / i_rad
@@ -33,7 +32,7 @@ def _transform_point_full_logic(z_rad, z_ang, i_psi, is_exo):
     return i_rad, i_ang, h, shell_id
 
 # =================================================================
-# WORKER (RECHNUNG PRO PSI)
+# worker (calculation per psi)
 # =================================================================
 
 def _int_trj_worker(args):
@@ -47,7 +46,7 @@ def _int_trj_worker(args):
     int_traj = bm.balmisflight(local_data, True, False)
     n = len(int_traj)
     
-    # 7 Spalten: psi, time, r, beta, x, y, shell_id
+    # psi, time, r, beta, x, y, shell_id
     out = np.zeros((n, 7)) 
     is_exo = (local_data["traj_type"] == "int_exo")
     max_h = 0.0
@@ -66,7 +65,7 @@ def _int_trj_worker(args):
     return out, max_h
 
 # =================================================================
-# HAUPTFUNKTIONEN (IDENTISCHE SIGNATUREN)
+# main function
 # =================================================================
 
 def interceptor_table(interc_data, ind_flight_dataprint=False, psi_step=0.25):
@@ -76,15 +75,14 @@ def interceptor_table(interc_data, ind_flight_dataprint=False, psi_step=0.25):
     worker_args = [(interc_data.copy(), psi_step, j) for j in range(psi_n)]
     int_table_0 = np.empty(psi_n, dtype=object)
     
-    # Nutzt Pool statt manueller Process-Queue (effizienter)
     with Pool(processes=max(1, cpu_count() - 1)) as pool:
         for i, (res_array, max_h_m) in enumerate(pool.imap(_int_trj_worker, worker_args)):
             int_table_0[i] = res_array
             if i % 20 == 0 or i == psi_n - 1:
                 h_km = max_h_m / 1000.0
-                print(f"\r[SHELL-METRIK] Fortschritt: {i/(psi_n-1)*100:3.0f}% | Psi: {i*psi_step:5.1f}° | Max-H: {h_km:6.1f} km", end='')
+                print(f"\r Progress: {i/(psi_n-1)*100:3.0f}% | Psi: {i*psi_step:5.1f}° | Max-H: {h_km:6.1f} km", end='')
     
-    print("\n[MDFCC] Interceptor-Tabelle generiert.")
+    print("\n[MDFCC] Interceptor table generated.")
     return int_table_0
 
 def interception_table(interceptor_data, int_table_v1, psi_step=0.25, beta_step=0.1):
@@ -98,17 +96,14 @@ def interception_table(interceptor_data, int_table_v1, psi_step=0.25, beta_step=
     beta_grid = np.arange(np.max(all_th), np.min(all_th) - 1e-7, -beta_step_rad)
     
     out = []
-    for b in tqdm(beta_grid, desc="Matching Interception Points"):
+    for b in tqdm(beta_grid, desc=" Interception Points"):
         segment_data = [] 
         for t in valid:
-            # Nur bis zum Apogäum betrachten für eindeutige Interpolation
             idx_apogee = np.argmax(t[:, 2]) 
             t_ascent = t[:idx_apogee+1]
             th_vals = t_ascent[:, 3]
 
-            # Prüfen, ob der Winkel b im Bereich dieser Trajektorie liegt
             if th_vals.min() - 1e-7 <= b <= th_vals.max() + 1e-7:
-                # Intervall finden (i_t1, i_t2)
                 found_interval = False
                 for i in range(len(th_vals) - 1):
                     b1, b2 = th_vals[i], th_vals[i+1]
@@ -123,16 +118,14 @@ def interception_table(interceptor_data, int_table_v1, psi_step=0.25, beta_step=
                     time1, time2 = t_ascent[i_t1, 1], t_ascent[i_t2, 1]
                     s_id1, s_id2 = t_ascent[i_t1, 6], t_ascent[i_t2, 6]
 
-                    # --- GEOMETRISCHE INTERPOLATION ---
+                    # --- geometric interpolation ---
                     db = beta1 - beta2
                     if abs(db) > 1e-12:
-                        # Deine Formeln mit atan2-Fix gegen Division durch Null
                         y = rad_2 * cos(db) - rad_1
                         x = rad_2 * sin(db)
                         gamma = atan2(y, x)
                         i_rad = rad_1 * cos(gamma) / cos(gamma + beta1 - b)
 
-                        # Zeitberechnung über Sehnenverhältnis
                         dr1_q = rad_1**2 + i_rad**2 - 2 * rad_1 * i_rad * cos(beta1 - b)
                         dr_q  = rad_1**2 + rad_2**2 - 2 * rad_1 * rad_2 * cos(db)
                         i_time = time1 + (time2 - time1) * sqrt(max(0.0, dr1_q/dr_q))
@@ -140,7 +133,7 @@ def interception_table(interceptor_data, int_table_v1, psi_step=0.25, beta_step=
                         i_rad = rad_1
                         i_time = time1
 
-                    # Shell-ID vom nächstgelegenen Stützpunkt übernehmen
+                    # shell-id
                     s_id = s_id1 if abs(b - beta1) < abs(b - beta2) else s_id2
                     
                     if i_rad > 0:
@@ -150,7 +143,7 @@ def interception_table(interceptor_data, int_table_v1, psi_step=0.25, beta_step=
             out.append(np.array([[0.0, 0.0, 0.0, b, -1.0]]))
             continue
 
-        # Sortierung nach Zeit für den Footprint-Check
+        # sort by time
         segment_array = np.array(segment_data)
         segment_array = segment_array[segment_array[:, 1].argsort()]
         out.append(segment_array)
@@ -166,12 +159,12 @@ def interception_table(interceptor_data, int_table_v1, psi_step=0.25, beta_step=
 
 @nb.njit(cache=True, fastmath=True)
 def _numba_mis_traj_loop(tar_trj, beta_step_val, qbeta_beg, angle_eps_val):
-    # Puffer für das Ergebnis (t, r, beta, x, y)
+    # puffer for trajectories (t, r, beta, x, y)
     mis_traj = np.empty((7200, 5)) 
     i_mbeta = 0
     i_tr = 0
     
-    # Startwinkel-Konfiguration
+    # start angle configuration
     i_qbeta_upp = qbeta_beg
     i_qbeta_low = qbeta_beg - beta_step_val
     i_qbup_r = radians(i_qbeta_upp)
@@ -183,29 +176,23 @@ def _numba_mis_traj_loop(tar_trj, beta_step_val, qbeta_beg, angle_eps_val):
         i_tr1 = i_tr
         i_tr2 = i_tr + 1
         
-        # Winkel der aktuellen Solver-Schritte
         b1 = tar_trj[i_tr, 4]
         b2 = tar_trj[i_tr + 1, 4]
         
-        # --- IF-CASES LOGIK ---
         diff_up = b2 - i_qbup_r
         diff_lo = b2 - i_qblo_r
         
         if diff_up >= 0:
-            # Vorwärtsbewegung: Grid-Punkt liegt zwischen i_tr und i_tr + 1
             i_qbeta_r = i_qbup_r 
             add_point = True
-            # Update für den nächsten Grid-Schritt
             i_qbeta_low = i_qbeta_upp
             i_qblo_r = i_qbup_r
             i_qbeta_upp += beta_step_val
             i_qbup_r = radians(i_qbeta_upp)
-            # Wichtig: i_tr NICHT erhöhen, falls der NÄCHSTE Grid-Punkt auch noch im selben Intervall liegt
             if b2 < i_qbup_r:
                 i_tr += 1
                 
         elif diff_lo <= 0:
-            # Rückwärtsbewegung
             i_qbeta_r = i_qblo_r 
             add_point = True
             i_qbeta_upp = i_qbeta_low
@@ -215,12 +202,10 @@ def _numba_mis_traj_loop(tar_trj, beta_step_val, qbeta_beg, angle_eps_val):
             if b2 > i_qblo_r:
                 i_tr += 1
         else:
-            # Kein Grid-Punkt in diesem Intervall -> Nächster Solver-Schritt
             i_tr += 1
             continue
 
         if add_point:
-            # Interpolation
             db = b2 - b1
             if abs(db) > 1e-15:
                 frac = (i_qbeta_r - b1) / db
@@ -249,24 +234,17 @@ def mis_traj_sample(tar_trj, beta_step=set_beta_step):
     if tar_trj is None or len(tar_trj) < 2: 
         return np.empty((0, 5))
     
-    # KORREKTUR: Greife auf den ersten Punkt (Index 0) und die Winkel-Spalte (Index 4) zu
-    # tar_trj[0, 4] ist der Startwinkel im Bogenmaß
+    # tar_trj[0, 4] is the start angle in radian measure
     qbeta_beg = int(ceil(degrees(tar_trj[0, 4]) / beta_step)) * beta_step
     
-    # Das eigentliche Numba-Sampling (bleibt unverändert)
     sampled_trj = _numba_mis_traj_loop(tar_trj, beta_step, qbeta_beg, angle_eps)
     
-    # --- DEBUG-PRINT (Shell-Metrik) ---
     if len(sampled_trj) > 0:
-        # r (Spalte 1) ist in Metern (wegen R_e = 6.37e6)
         raw_r = np.max(sampled_trj[:, 1])
-        
-        # Umrechnung in km für die Anzeige ( Shell-Metrik)
-        # Falls Radius den Erdradius enthält: h = r - R_e
         h_meter = raw_r - R_e if raw_r > R_e else raw_r
         h_km = h_meter / 1000.0
         
         shell_id = int(max(0, h_km // 10))
-        print(f"\r[SHELL-METRIK] Fortschritt: 100% | Psi:  MIS° | Max-H: {h_km:6.2f} km | Shell: {shell_id}", end='', flush=True)
+        print(f"\r[Shell-Metric] Max-H: {h_km:6.2f} km | Shell: {shell_id}", end='', flush=True)
 
     return sampled_trj
