@@ -2161,185 +2161,11 @@ def min_detrange() :
         print("h_int_min={:.1f}, t_int_lnc={:.1f} op_range={:.1f} t_delay={:.1f} h_discr={:.1f}".format(h_int_min/1000, t_int_lnc, op_range/1000, t_delay, h_discr/1000))
         print("Interceptor {} vs Missile {} : Minimum detection range is less than {:.0f} km\n".format(i_type, m_type, dr_min/1000))
         
-
-
 def gui_footprint() :
     m_type = mtype_var.get()
     i_type = itype_var.get()
     mode2 = fp_calc_mode_var.get()
-    compare = fp_compare_var.get()
-    emode_sls = emode_var.get()
-    angle_step = angle_step_var.get()
-    #angle_step_mode2 = angle_step_mode2_var.get()
-    num_steps_mode2 = num_steps_mode2_var.get()
-    acc = acc_var.get()
-    h_int_min = mia_var.get()
-    h_discr = h_discr_var.get()
-    t_delay = t_delay_var.get()
-    plot_hit_charts = plot_hit_charts_var.get()
-    hit_chart_angle = hit_chart_angle_var.get()
-
-    if set_time_stamp_var.get() : # possibly delete? $$$ #TODO
-        r_now = datetime.now()
-        t_stamp = "-" + r_now.strftime("%y%m%d-%H%M")
-    else :
-        t_stamp = ''
- 
-    if mode2 :
-        print("\nFootprint calculation mode2 routine started. Missile type m{}, Interceptor type i{}".format(m_type, i_type))
-    else :
-        print("\nFootprint calculation routine started. Missile type m{}, Interceptor type i{}".format(m_type, i_type))
-    print("Missile type m{} trajectory calculating...".format(m_type))#, end='')
-
-    if stdout_to_file_var.get() :  # possibly delete? $$$ #TODO
-        file_name = 'footprint_m{}_i{}{}.txt'.format(m_type, i_type, t_stamp)
-        if set_keep_stdout_file_var.get() :
-            m.keep_old_file(file_name)
-        original = sys.stdout
-        sys.stdout = open(file_name, 'w')
-
-    missile_data = rd.missile(m_type, rd_fname)
-    trj = bm.balmisflight(missile_data)
-    mrange = trj[len(trj) - 1, 2] * R_e
-    print("\rMissile type m{} trajectory calculated, missile range={:.0f} km".format(m_type, mrange/1000))
-    
-    if mrange > bm_range_limit :
-        print("STOP: Missile range is too long for footprint calculation. The limit is {} km".format(bm_range_limit/1000))
-        return False
-
-    dist = mrange * dist_param # irrelevant, dist is hardcoded in fp.footprint_calc_v2 function
-
-    n_stages = len(missile_data["t_bu"])
-    burn_time = sum(missile_data["t_bu"]) + sum(missile_data["t_delay"]) - missile_data["t_delay"][n_stages - 1]
-    t_int_lnc = burn_time + t_delay # earliest int launch counting from missile launch
-    
-    det_range = 0.0
-    interceptor_data = rd.interceptor(i_type, rd_fname)
-            
-    if "det_range" in interceptor_data.keys() : # detection range, this is set in the "rocket_data" module
-        if len(interceptor_data["det_range"]) > m_type :
-            det_range = interceptor_data["det_range"][m_type] # detection range, this is set in the "rocket_data" module
-        else :
-            print("No detection range value found for this missile. Detection range is set to 0.")
-            print("For quick test run 'Multi-Footprint by Detection Range' routine specifying one or more detection range.")
-    else :
-        print("No detection range values set in the interceptor data. Detection range set to 0.")
-        print("For quick test run 'Multi-Footprint by Detection Range' routine specifying one or more detection range.")
-
-    if det_range < 11000 : # can be set in meters or km, convert to meters if set in km
-         det_range *= 1000
-
-    if h_discr < 1000 : # can be set in meters or km, convert to meters if set in km
-        h_discr *= 1000
-        
-    if h_int_min < 500 : # can be set in meters or km, convert to meters if set in km
-        h_int_min *= 1000
-
-    mpia = interceptor_data['mpia']
-    mpia *= 1000
-    h_int_min = max(h_int_min, mpia)
-
-    maxia = interceptor_data['maxia']
-    maxia *= 1000
-
-    fp_st = time.time()
-    
-    op_range = interceptor_data['op_range']
-    if op_range < 2000 :
-        op_range *= 1000
-    if op_range :
-        print(">Interceptor's operational range {:.0f} km".format(op_range/1000))
-    else :
-        print(">Interceptor's operational range is not set.")        
-
-    int_table = m.load_int_table(i_type, fcc_constants.psi_step, beta_step, rd_fname, t_stamp, set_keep_int_tables_var.get())                
-
-    search_func = ss.short_search
-    search_type = "Shoot_Once"
-    save_label = "son"
-
-    if emode_sls :
-        search_func = ss.sls_search
-        search_type = "Shoot_Look_Shoot"
-        save_label = "sls"
-        
-    print("Type of interception: " + search_type)
-
-    if not mode2 :
-        footprint_tab = fp.footprint_calc_v2(search_func, 
-                                         trj,
-                                         int_table,
-                                         h_int_min, 
-                                         maxia,
-                                         t_int_lnc,
-                                         angle_step,
-                                         op_range,
-                                         det_range,
-                                         t_delay,
-                                         h_discr,
-                                         acc,
-                                         dist,
-                                         plot_hit_charts,
-                                         hit_chart_angle,
-                                         m_type,
-                                         i_type
-                                         )
-    else :
-        if emode_sls :
-            search_func = ss.sls_search2
-        else :
-            search_func = ss.short_search2
-
-        footprint_tab2 = ss.footprint_mode2(search_func, 
-                                         trj,
-                                         int_table,
-                                         h_int_min, 
-                                         maxia,
-                                         t_int_lnc,
-                                         angle_step_mode2, # global parameter
-                                         op_range,
-                                         det_range,
-                                         t_delay,
-                                         h_discr,
-                                         acc,
-                                         num_steps_mode2,
-                                         plot_hit_charts,
-                                         hit_chart_angle,
-                                         m_type,
-                                         i_type
-                                         )
-        footprint_tab = footprint_tab2[0] # see if np.any below
-
-    """
-    if mode2 :
-            part1, part2 = footprint_tab2
-            if np.any(part2) :
-                footprint_tab = [part1, part2]
-                label_arr = ['part1', 'part2']         
-            else :
-                footprint_tab = [part1]
-                label_arr = ['']
-    """
-
-    if np.any(footprint_tab) :
-        if not mode2 :
-            if det_range :
-                header_str = "angle, distance, acc_prm, x, y, m_type={} i_type={} min_ia={} maxia={} t_int_lnc={} angle_step={} det_range={} km t_delay={} h_discr={} {}"
-                header_str = header_str.format(m_type, i_type, h_int_min/1000, maxia/1000, t_int_lnc, angle_step, det_range/1000, t_delay, h_discr/1000, search_type)
-                chart_info_str = "min_ia={} maxia={} t_int_lnc={} angle_step={} det_range={} km t_delay={} h_discr={} {}"
-                chart_info_str = chart_info_str.format(h_int_min/1000, maxia/1000, t_int_lnc, angle_step, det_range/1000, t_delay, h_discr/1000, search_type)
-            else :
-                header_str = "angle, distance, acc_prm, x, y, m_type={} i_type={} min_ia={} maxia={} t_int_lnc={} angle_step={} sat_delay={} h_discr={} {}"
-                header_str = header_str.format(m_type, i_type, h_int_min/1000, maxia/1000, t_int_lnc, angle_step, fcc_constants.sat_delay, h_discr/1000, search_type)
-                chart_info_str = "min_ia={} maxia={} t_int_lnc={} angle_step={} sat_delay={} h_discr={} {}"
-                chart_info_str = chart_info_str.format(h_int_min/1000, maxia/1000, t_int_lnc, angle_step, fcc_constants.sat_delay, h_discr/1000, search_type)
-            data_fname = footprint_path + "/footprint_m{}_i{}_{}{}.json".format(m_type, i_type, save_label, t_stamp)
-            
-def gui_footprint() :
-    m_type = mtype_var.get()
-    i_type = itype_var.get()
-    mode2 = fp_calc_mode_var.get()
-    compare = fp_compare_var.get()  # Holt den Zustand aus Ihrer GUI-Checkbox
+    compare = fp_compare_var.get() 
     emode_sls = emode_var.get()
     angle_step = angle_step_var.get()
     #angle_step_mode2 = angle_step_mode2_var.get()
@@ -2425,6 +2251,8 @@ def gui_footprint() :
     
     if compare:
         int_table_con = m.load_int_table(i_type, fcc_constants.psi_step, beta_step, rd_fname, t_stamp, set_keep_int_tables_var.get(), concentric=True)
+    else:
+        int_table_con = None
 
     search_func = ss.short_search
     search_type = "Shoot_Once"
@@ -2447,24 +2275,53 @@ def gui_footprint() :
             footprint_tab_con = fp.footprint_calc_v2(search_func, trj, int_table_con, h_int_min, maxia, t_int_lnc, angle_step, op_range, det_range, t_delay, h_discr, acc, dist, plot_hit_charts, hit_chart_angle, m_type, i_type)
     else :
         if emode_sls :
-            search_func = ss.sls_search2
+            search_func_m2 = ss.sls_search2
         else :
-            search_func = ss.short_search2
+            search_func_m2 = ss.short_search2
 
-        # 1. angle-elevation footprint mode 2
-        footprint_tab2 = ss.footprint_mode2(search_func, trj, int_table, h_int_min, maxia, t_int_lnc, angle_step_mode2, op_range, det_range, t_delay, h_discr, acc, num_steps_mode2, plot_hit_charts, hit_chart_angle, m_type, i_type)
-        footprint_tab = footprint_tab2[0]
-        
-        # 2. concentric footprint mode 2
         if compare:
-            print("Calculating Concentric Footprint Mode 2 for Comparison...")
-            footprint_tab2_con = ss.footprint_mode2(search_func, trj, int_table_con, h_int_min, maxia, t_int_lnc, angle_step_mode2, op_range, det_range, t_delay, h_discr, acc, num_steps_mode2, plot_hit_charts, hit_chart_angle, m_type, i_type)
-            footprint_tab_con = footprint_tab2_con[0]
+            print("Starting Dual-Grid Footprint Calculation Mode 2 (Compare Mode)...")
+            footprint_results = ss.footprint_mode2(search_func_m2, trj, int_table, h_int_min, maxia, t_int_lnc, angle_step_mode2, op_range, det_range, t_delay, h_discr, acc, num_steps_mode2, plot_hit_charts, hit_chart_angle, m_type, i_type, t_itable_con=int_table_con)
+            
+            footprint_tab = footprint_results[0]
+            footprint_tab_con = footprint_results[1]
+            footprint_tab2 = footprint_tab
+            footprint_tab2_con = footprint_tab_con
+        else:
+            print("Starting Standard Footprint Calculation Mode 2...")
+            footprint_results = ss.footprint_mode2(search_func_m2, trj, int_table, h_int_min, maxia, t_int_lnc, angle_step_mode2, op_range, det_range, t_delay, h_discr, acc, num_steps_mode2, plot_hit_charts, hit_chart_angle, m_type, i_type)
+            footprint_tab = footprint_results[0]
+            footprint_tab2 = footprint_tab
 
-    if np.any(footprint_tab) :
+    fprint_tab_lst = []
+
+    has_data = False
+    if compare:
+        if footprint_tab is not None and len(footprint_tab) > 0:
+            fprint_tab_lst.append(footprint_tab)
+        else:
+            fprint_tab_lst.append(np.zeros((0, 5)))
+
+        if footprint_tab_con is not None and len(footprint_tab_con) > 0:
+            fprint_tab_lst.append(footprint_tab_con)
+        else:
+            fprint_tab_lst.append(np.zeros((0, 5)))
+            
+        if (footprint_tab is not None and len(footprint_tab) > 0) or \
+           (footprint_tab_con is not None and len(footprint_tab_con) > 0):
+            has_data = True
+    else:
+        if np.any(footprint_tab):
+            fprint_tab_lst.append(footprint_tab)
+            has_data = True
+        else:
+            fprint_tab_lst.append(np.zeros((0, 5)))
+            has_data = False
+
+    if has_data :
         if compare:
             label_arr = ['Angle-Elevation', 'Concentric']
-            bw = False
+            bw = False 
             save_label += "_compare"
         else:
             label_arr = ['']
@@ -2491,7 +2348,6 @@ def gui_footprint() :
             
             chart_fname = footprint_path + "/footprint_m{}_i{}_{}{}.png".format(m_type, i_type, save_label, t_stamp)
     
-            # if need to compare, send both tab to be plotted
             plots_to_render = [footprint_tab, footprint_tab_con] if compare else [footprint_tab]
             gui_fpchart_n(plots_to_render, label_arr, chart_info_str, title_str, chart_fname, header_str, mrange, data_fname, False, bw)
 
@@ -2508,6 +2364,7 @@ def gui_footprint() :
                 chart_info_str = chart_info_str.format(h_int_min/1000, maxia/1000, t_int_lnc, num_steps_mode2, fcc_constants.sat_delay, h_discr/1000, search_type)
             
             data_fname = footprint_path + "/footprint_mode2_m{}_i{}_{}{}.json".format(m_type, i_type, save_label, t_stamp)
+            
             if op_range :
                 title_str = "Footprint Mode2: i_type={} op_range={:.0f} km m_type={} mrange={:.0f} km".format(i_type, op_range/1000, m_type, mrange/1000)
             else :
@@ -2529,6 +2386,7 @@ def gui_footprint() :
         return (footprint_tab2, footprint_tab2_con) if compare else footprint_tab2
     else :
         return (footprint_tab, footprint_tab_con) if compare else footprint_tab
+
 
 
 

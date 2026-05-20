@@ -70,7 +70,6 @@ def _int_trj_worker(args):
 
 def interceptor_table(interc_data, ind_flight_dataprint=False, psi_step=0.25):
     psi_n = int(90 / psi_step)
-    print(f"\n[MDFCC] Berechnung von {psi_n} Trajektorien (psi_step={psi_step})")
     
     worker_args = [(interc_data.copy(), psi_step, j) for j in range(psi_n)]
     int_table_0 = np.empty(psi_n, dtype=object)
@@ -156,95 +155,147 @@ def interception_table(interceptor_data, int_table_v1, psi_step=0.25, beta_step=
 # =================================================================
 # MISSILE SAMPLING
 # =================================================================
+@nb.njit(cache=True, fastmath=True)
+def _spherical_3d_to_2d_angle(psi, xi, phi):
+    """
+    Computes the central Earth angle (theta) relative to the ILP using the Spherical Law of Cosines.
+    """
+    cos_theta = cos(psi) * cos(xi) + sin(psi) * sin(xi) * cos(phi)
+    cos_theta = max(-1.0, min(1.0, cos_theta))
+    return acos(cos_theta)
 
 @nb.njit(cache=True, fastmath=True)
-def _numba_mis_traj_loop(tar_trj, beta_step_val, qbeta_beg, angle_eps_val):
-    # puffer for trajectories (t, r, beta, x, y)
-    mis_traj = np.empty((7200, 5)) 
-    i_mbeta = 0
-    i_tr = 0
+def _numba_mis_traj_loop(tar_trj, beta_step, qbeta_beg, angle_eps, psi, phi, concentric):
+    """
+    Original geometric interpolation loop accelerated with Numba NJIT.
+    Supports optional 3D spherical coordinate mapping via the concentric flag.
+    """
+    # Create a local tracking matrix for the loop execution
+    # Index 4 will hold either the original beta or the projected theta angle
+    n_points = len(tar_trj)
+    working_trj = np.empty((n_points, 5))
     
-    # start angle configuration
+    for i in range(n_points):
+        working_trj[i, 0] = tar_trj[i, 0] # time
+        working_trj[i, 3] = tar_trj[i, 3] # rad
+        
+        xi = tar_trj[i, 4] # raw 3D angular flight path distance
+        if concentric:
+            # Overwrite index 4 with the projected true central Earth angle (theta)
+            working_trj[i, 4] = _spherical_3d_to_2d_angle(psi, xi, phi)
+        else:
+            working_trj[i, 4] = xi
+
+    # Buffer for sampled output trajectories (time, rad, beta, x, y)
+    mis_traj = np.empty((3600, 5)) 
+    
+    i_mbeta = 0 # index of the quantized trajectory
+    i_tr = 0    # index of the original trajectory
     i_qbeta_upp = qbeta_beg
-    i_qbeta_low = qbeta_beg - beta_step_val
+    i_qbeta_low = qbeta_beg - beta_step
     i_qbup_r = radians(i_qbeta_upp)
     i_qblo_r = radians(i_qbeta_low)
     
-    while i_tr < len(tar_trj) - 1:
-        add_point = False
-        i_qbeta_r = 0.0
-        i_tr1 = i_tr
-        i_tr2 = i_tr + 1
-        
-        b1 = tar_trj[i_tr, 4]
-        b2 = tar_trj[i_tr + 1, 4]
-        
-        diff_up = b2 - i_qbup_r
-        diff_lo = b2 - i_qblo_r
-        
-        if diff_up >= 0:
-            i_qbeta_r = i_qbup_r 
-            add_point = True
-            i_qbeta_low = i_qbeta_upp
-            i_qblo_r = i_qbup_r
-            i_qbeta_upp += beta_step_val
-            i_qbup_r = radians(i_qbeta_upp)
-            if b2 < i_qbup_r:
-                i_tr += 1
+    diff = working_trj[0, 4] - i_qbup_r
+    if abs(diff) < angle_eps:
+        i_rad = working_trj[0, 3]
+        mis_traj[i_mbeta] = [working_trj[0, 0], i_rad, i_qbup_r, i_rad * cos(i_qbup_r), i_rad * sin(i_qbup_r)]
+        i_qbeta_low = i_qbeta_upp
+        i_qblo_r = i_qbup_r
+        i_qbeta_upp = i_qbeta_upp + beta_step
+        i_qbup_r = radians(i_qbeta_upp)
+        i_mbeta += 1
+        i_tr += 1
+
+    while i_tr < n_points - 1:
+        add_point = True
+        while True:
+            diff_up = working_trj[i_tr + 1, 4] - i_qbup_r
+            diff_lo = working_trj[i_tr + 1, 4] - i_qblo_r
+            
+            if diff_up >= 0:
+                i_qbeta_r = i_qbup_r 
+                i_tr2 = i_tr + 1
+                i_tr1 = i_tr                
+                i_qbeta_low = i_qbeta_upp
+                i_qblo_r = i_qbup_r
+                i_qbeta_upp = i_qbeta_upp + beta_step
+                if diff_up == 0:
+                    i_tr += 1
+                i_qbup_r = radians(i_qbeta_upp)
+                break
                 
-        elif diff_lo <= 0:
-            i_qbeta_r = i_qblo_r 
-            add_point = True
-            i_qbeta_upp = i_qbeta_low
-            i_qbup_r = i_qblo_r
-            i_qbeta_low -= beta_step_val
-            i_qblo_r = radians(i_qbeta_low)
-            if b2 > i_qblo_r:
-                i_tr += 1
-        else:
+            elif diff_lo <= 0:
+                i_qbeta_r = i_qblo_r 
+                i_tr2 = i_tr + 1
+                i_tr1 = i_tr                
+                i_qbeta_upp = i_qbeta_low
+                i_qbup_r = i_qblo_r
+                i_qbeta_low = i_qbeta_low - beta_step
+                if diff_lo == 0:
+                    i_tr += 1
+                i_qblo_r = radians(i_qbeta_low)
+                break
+                
             i_tr += 1
-            continue
+            if i_tr > n_points - 2:
+                add_point = False
+                break
 
-        if add_point:
-            db = b2 - b1
-            if abs(db) > 1e-15:
-                frac = (i_qbeta_r - b1) / db
+        if add_point and i_mbeta < 3600:
+            rad_1 = working_trj[i_tr1, 3]
+            rad_2 = working_trj[i_tr2, 3]
+            beta1 = working_trj[i_tr1, 4]
+            beta2 = working_trj[i_tr2, 4]
+            
+            # Original geometric triangulation and arc formulas preserved identically
+            gamma = atan((rad_2 * cos(beta1 - beta2) - rad_1) / (rad_2 * sin(beta1 - beta2)))
+
+            if abs(beta1 - i_qbeta_r) < angle_eps:
+                i_rad = rad_1
+                dr1_q = (rad_1 - i_rad) * (rad_1 - i_rad)
             else:
-                frac = 0.0
-            
-            i_rad = tar_trj[i_tr1, 3] + frac * (tar_trj[i_tr2, 3] - tar_trj[i_tr1, 3])
-            i_time = tar_trj[i_tr1, 0] + frac * (tar_trj[i_tr2, 0] - tar_trj[i_tr1, 0])
+                i_rad = rad_1 * cos(gamma) / cos(gamma + beta1 - i_qbeta_r)        
+                dr1_q = rad_1*rad_1 + i_rad*i_rad - 2.0 * rad_1 * i_rad * cos(beta1 - i_qbeta_r)
 
-            mis_traj[i_mbeta, 0] = i_time
-            mis_traj[i_mbeta, 1] = i_rad
-            mis_traj[i_mbeta, 2] = i_qbeta_r
-            mis_traj[i_mbeta, 3] = i_rad * cos(i_qbeta_r)
-            mis_traj[i_mbeta, 4] = i_rad * sin(i_qbeta_r)
+            dr_q = rad_1*rad_1 + rad_2*rad_2 - 2.0 * rad_1 * rad_2 * cos(beta1 - beta2)
+
+            time1 = working_trj[i_tr1, 0]
+            time2 = working_trj[i_tr2, 0]
             
-            i_mbeta += 1
-            if i_mbeta >= 7200: break
+            if dr_q > 0:
+                i_time = time1 + (time2 - time1) * sqrt(dr1_q / dr_q)
+            else:
+                i_time = time1
                 
+            mis_traj[i_mbeta] = [i_time, i_rad, i_qbeta_r, i_rad * cos(i_qbeta_r), i_rad * sin(i_qbeta_r)]
+            i_mbeta += 1
+            
     return mis_traj[:i_mbeta]
 
 
-def mis_traj_sample(tar_trj, beta_step=set_beta_step):
+def mis_traj_sample(tar_trj, beta_step=set_beta_step, psi_deg=0.0, phi_deg=0.0, concentric=True):
     """
-    Samples missile trajectory und gibt Shell-Metrik für Debugging aus.
+    Wrapper function to sample the missile trajectory into the unified angular grid.
+    Fulfills the academic framing of "uniformly better resolution".
     """
-    if tar_trj is None or len(tar_trj) < 2: 
-        return np.empty((0, 5))
+    psi_rad = radians(psi_deg)
+    phi_rad = radians(phi_deg)
     
-    # tar_trj[0, 4] is the start angle in radian measure
-    qbeta_beg = int(ceil(degrees(tar_trj[0, 4]) / beta_step)) * beta_step
-    
-    sampled_trj = _numba_mis_traj_loop(tar_trj, beta_step, qbeta_beg, angle_eps)
-    
-    if len(sampled_trj) > 0:
-        raw_r = np.max(sampled_trj[:, 1])
-        h_meter = raw_r - R_e if raw_r > R_e else raw_r
-        h_km = h_meter / 1000.0
+    # Pre-calculate the starting quantized boundary step using python-level execution
+    xi_start = tar_trj[0, 4]
+    if concentric:
+        theta_start = degrees(_spherical_3d_to_2d_angle(psi_rad, xi_start, phi_rad))
+    else:
+        theta_start = degrees(xi_start)
         
-        shell_id = int(max(0, h_km // 10))
-        print(f"\r[Shell-Metric] Max-H: {h_km:6.2f} km | Shell: {shell_id}", end='', flush=True)
-
-    return sampled_trj
+    qbeta_beg = int(ceil(theta_start / beta_step)) * beta_step
+    
+    # Progress visualization statement forced safely onto standard console stream
+    print(f"Sampling missile trajectory... (Geom: Psi={psi_deg:.2f}°, Phi={phi_deg:.2f}°, Theta = {theta_start:.2f} | Concentric={concentric})", end='', flush=True)
+    
+    # Execute the lightning-fast compiled Numba engine pass
+    res = _numba_mis_traj_loop(tar_trj, beta_step, qbeta_beg, angle_eps, psi_rad, phi_rad, concentric)
+    
+    print(f" -> Done. Extracted {len(res)} unified grid crossings.")
+    return res
