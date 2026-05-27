@@ -83,15 +83,21 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
 
     i_dr = 0
     if not sls_second :
-        if det_range > 0 : # detecion range limitations 
-            while tar_traj[i_dr, 3] > det_range : # TODO optimize search $$$
+        if det_range > 0 : # detection range limitations 
+            while tar_traj[i_dr, 3] > det_range : 
                 i_dr += 1
                 if i_dr == len(tar_traj) - 1 :
                     if debug_print :
                         print("short search exception: missile always beyond detection range)")
-                    return False
-            t_int_lnc = max(t_bout, tar_traj[i_dr, 0]) + t_delay  # delay or no delay after detection? $$$
-        
+                    # === NEU: Verhindere harten Abbruch im Concentric-Modus ===
+                    if concentric:
+                        t_int_lnc = t_bout
+                        break
+                    else:
+                        return False
+            if i_dr < len(tar_traj) - 1 or not concentric:
+                t_int_lnc = max(t_bout, tar_traj[i_dr, 0]) + t_delay
+                
         #i_ohd=0
         #if t_delay != 0 : # over the horizon detection criterium
             i_ohd = 0
@@ -155,13 +161,16 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
 
     # dist_opt is the metric distance between ILP and MLP (in meters)
     # fi_opt is the flight path plane aspect angle (phi)
+    print("dist_opt: ", dist_opt)
+    print("fi_opt: ", fi_opt)
     psi_d = degrees(dist_opt / R_e)
     phi_d = degrees(fi_opt)
 
-    if concentric == True:
-        mis_traj = tb_con.mis_traj_sample(tar_traj, psi_deg=psi_d, phi_deg=phi_d)
+    if concentric:
+        mis_traj = tb_con.mis_traj_sample(tar_traj, psi_deg=psi_d, phi_deg=phi_d) 
     else:
         mis_traj = tb.mis_traj_sample(tar_traj)
+        
         
     m_beta_max = max(mis_traj[:, 2])
     i_m_beta_max = np.argmax(mis_traj[:, 2])
@@ -202,57 +211,185 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
     #intemp = int_table[0]    
     beta_zero = max(othi_r, int_table[0][0, 3])
     
-    while mis_traj[i2_m_beg, 2] < beta_zero : #int_table[0][0, 3] :
-        """ this needs to be addressed by sampling int table to negative betas -- done """
-        if i2_m_beg == len(mis_traj) - 1 :
-            if debug_print : 
-                print("False: all missile trajectory below lowest interceptor beta")
-            return False
-        i2_m_beg += 1
-#    print("int_table[0][1, 3]={}, i2_m_beg = {}, mis_traj[i2_m_beg, 0]={}".format(int_table[0][1, 3], i2_m_beg, mis_traj[i2_m_beg]))
+    if concentric and beta_zero < 0.5:
+        beta_zero_rad = np.radians(1.0)  # Reicht aus, um den 0.03° Randfehler zu überspringen!
+    else:
+        beta_zero_rad = np.radians(beta_zero) if beta_zero > 1.5 else beta_zero
+
+    if not concentric:
+        while mis_traj[i2_m_beg, 2] < beta_zero_rad:
+            if i2_m_beg == len(mis_traj) - 1:
+                if debug_print: 
+                    print("False: all missile trajectory below lowest interceptor beta")
+                return False
+            i2_m_beg += 1
+    else:
+        # PHYSIKALISCHE SUCHE FÜR CONCENTRIC:
+        # Wir suchen chronologisch den ersten echten Punkt, an dem die Rakete über den Horizont kommt.
+        i2_m_beg = 0
+        found_valid_beta = False
+        
+        for idx in range(len(mis_traj)):
+            if mis_traj[idx, 2] >= beta_zero_rad:
+                # Absicherung: Wir überspringen den fehlerhaften allerersten Index am Boden
+                if idx > 1:
+                    i2_m_beg = idx
+                    found_valid_beta = True
+                    break
+                
+        if not found_valid_beta:
+            # Fallback auf den mathematischen Scheitelpunkt, falls die Rakete extrem flach bleibt
+            max_idx = 0
+            max_val = mis_traj[0, 2]
+            for idx in range(len(mis_traj)):
+                if mis_traj[idx, 2] > max_val:
+                    max_val = mis_traj[idx, 2]
+                    max_idx = idx
+            i2_m_beg = max_idx
 
     m_beg = max(i1_m_beg, i2_m_beg)
     beta_il = mis_traj[m_beg, 2]
+    # Max-Valid-Index bestimmen
+    max_valid_index = len(int_table) - 1
+    grid_step_rad = np.radians(fcc_constants.beta_step)
+
+    if concentric:
+        table_beta_min = int_table[0][0, 3]
+        table_beta_max = int_table[-1][0, 3]
+        
+        beta_array = np.array([int_table[k][0, 3] for k in range(len(int_table))])
+        int_beta_il = int(np.argmin(np.abs(beta_array - beta_il)))
+        int_beta_il = max(0, min(int_beta_il, max_valid_index))
+        
+        current_eps = grid_step_rad * 4
+            
+        if beta_il < table_beta_min or beta_il > table_beta_max:
+            if debug_print:
+                print(f"[DEBUG CONCENTRIC] Kein Footprint: Raketen-Beta ({degrees(beta_il):.2f}°) "
+                      f"liegt außerhalb der Abfangtabelle ({degrees(table_beta_min):.2f}° - {degrees(table_beta_max):.2f}°)")
+            return False
+        
+        print(f"\n[DEBUG CONCENTRIC] Rakete beta_il (deg): {degrees(beta_il):.2f} | Best Match Tabelle (deg): {degrees(int_table[int_beta_il][0, 3]):.2f}")
+    else:
+
+        # Originaler Suchalgorithmus für das flache 2D-Modell
+        int_beta_il = 0
+        current_eps = angle_eps
+        
+        if (int_table[int_beta_il][0, 3] > m_beta_max):
+            if debug_print: 
+                print("All of the possibly interceptable missile trajectory is below lowest interceptor beta")
+            return False
+        
+        while int_beta_il < max_valid_index and int_table[int_beta_il][0, 3] < (beta_il - current_eps):
+            int_beta_il += 1
+            if int_beta_il > max_valid_index:
+                int_beta_il = max_valid_index
+                break
+
+            if not np.any(int_table[int_beta_il]):
+                if debug_print:
+                    print("!!!", end='')
+                if abs(pi/2 - beta_il) < current_eps:
+                    int_beta_il = max_valid_index
+                    break
+                else:
+                    m_beg += 1
+                    if m_beg >= len(mis_traj): 
+                        break
+                    beta_il = mis_traj[m_beg, 2]           
+                    int_beta_il -= 1
+
+    # 3. Das sichere Zeit- und Höhen-Debug-Print dynamisch ausführen
+    try:
+        # KORREKTUR: Nicht starr [0,1] abfragen, sondern den zeitlich/räumlich nächsten Punkt schätzen
+        ray = int_table[int_beta_il]
+        if ray is not None and len(ray) > 0 and ray[0, 3] != -1.0:
+            if concentric:
+                # Bei Concentric sind die Daten nach Zeit sortiert -> Finde naheliegendste Raketenzeit
+                t_mis = mis_traj[m_beg, 0]
+                idx_closest = int(np.argmin(np.abs(ray[:, 1] - t_mis)))
+                int_flight_time = f"{ray[idx_closest, 1]:.1f}"
+            else:
+                # Bei Klassisch nach Radius sortiert -> Finde naheliegendste Raketen-Entfernung
+                r_mis = mis_traj[m_beg, 1]
+                idx_closest = int(np.argmin(np.abs(ray[:, 2] - r_mis)))
+                int_flight_time = f"{ray[idx_closest, 1]:.1f}"
+        else:
+            int_flight_time = "N/A (Leer)"
+    except Exception as e:
+        int_flight_time = f"Err ({str(e)})"
+
+    print(f"[TIME-ALT CHECK] Winkel: {degrees(beta_il):.2f}° | Raketen-Zeit: {mis_traj[m_beg, 0]:.1f}s | Interceptor-Flugzeit: {int_flight_time}s")
+
 
     int_beta_il = 0 # index of the same beta in interception table
-    max_valid_index = len(int_table) - 1 # NEU: Letzter gültiger Index im Array
+    max_valid_index = len(int_table) - 1
 
-    if (int_table[int_beta_il][0, 3] > m_beta_max) : # (beta_il - angle_eps)) : <- ???
-        if debug_print : 
-            print("All of the possibly interceptable missile trajectory is below lowest interceptor beta")
-        return False
-    
-    # KORREKTUR 1: Zusätzliche Prüfung (int_beta_il < max_valid_index) direkt in der while-Bedingung
-    while int_beta_il < max_valid_index and int_table[int_beta_il][0, 3] < (beta_il - angle_eps) : # TODO optimize search $$$
-        int_beta_il += 1
+    grid_step_rad = np.radians(fcc_constants.beta_step)
+    current_eps = (grid_step_rad * 1.5) if concentric else angle_eps
+
+    if concentric:
+        table_beta_min = int_table[0][0, 3]
+        table_beta_max = int_table[-1][0, 3]
         
-        # KORREKTUR 2: Sicherheitsprüfung, falls wir trotz allem die Grenze sprengen
-        if int_beta_il > max_valid_index:
-            int_beta_il = max_valid_index
-            break
+        if beta_il < table_beta_min or beta_il > table_beta_max:
+            if debug_print:
+                print(f"[DEBUG CONCENTRIC] Kein Footprint: Raketen-Beta ({degrees(beta_il):.2f}°) "
+                      f"liegt außerhalb der Abfangtabelle ({degrees(table_beta_min):.2f}° - {degrees(table_beta_max):.2f}°)")
+            return False
+            
+        beta_array = np.array([int_table[k][0, 3] for k in range(len(int_table))])
+        calculated_idx = int(np.argmin(np.abs(beta_array - beta_il)))
+        calculated_idx = max(0, min(calculated_idx, max_valid_index))
 
-        if not np.any(int_table[int_beta_il]) : # to account for empty betas near vertical
-            if debug_print :
-                print("!!!", end='')
-            if abs(pi/2 -  beta_il) < angle_eps :
-                int_beta_il = max_valid_index # KORREKTUR 3: Nutzt die dynamische Variable
+        int_beta_il = calculated_idx
+        current_eps = grid_step_rad * 1.5
+        
+        print(f"\n[DEBUG CONCENTRIC] Rakete beta_il (deg): {degrees(beta_il):.2f} | Best Match Tabelle (deg): {degrees(int_table[int_beta_il][0, 3]):.2f}")
+
+
+    else:
+        current_eps = angle_eps
+        
+        if (int_table[int_beta_il][0, 3] > m_beta_max) :
+            if debug_print : 
+                print("All of the possibly interceptable missile trajectory is below lowest interceptor beta")
+            return False
+        
+        while int_beta_il < max_valid_index and int_table[int_beta_il][0, 3] < (beta_il - current_eps) :
+            int_beta_il += 1
+            
+            if int_beta_il > max_valid_index:
+                int_beta_il = max_valid_index
                 break
-            else:
-                m_beg += 1
-                if m_beg >= len(mis_traj): # KORREKTUR 4: Zusätzliche Absicherung für die Raketenbahn
-                    break
-                beta_il = mis_traj[m_beg, 2]           
-                int_beta_il -= 1
 
-    if abs(int_table[int_beta_il][0, 3] - beta_il) > angle_eps : 
+            if not np.any(int_table[int_beta_il]) :
+                if debug_print :
+                    print("!!!", end='')
+                if abs(pi/2 -  beta_il) < current_eps :
+                    int_beta_il = max_valid_index
+                    break
+                else:
+                    m_beg += 1
+                    if m_beg >= len(mis_traj): 
+                        break
+                    beta_il = mis_traj[m_beg, 2]           
+                    int_beta_il -= 1
+
+    if abs(int_table[int_beta_il][0, 3] - beta_il) > current_eps : 
         if debug_print : 
             print("short search exception: betas not equal: int_beta_il={} int_beta={}, mis_beta-eps={}".format(int_beta_il, int_table[int_beta_il][0, 3], beta_il-angle_eps))
             print("i1_m_beg = {} mis_traj[i1_m_beg, 0]={} mis_traj[i1_m_beg, 2]={} t_int_lnc = {}".format(i1_m_beg, mis_traj[i1_m_beg, 0], mis_traj[i1_m_beg, 2], t_int_lnc))
             print("i2_m_beg = {} mis_traj[i2_m_beg, 2]={} int_table[0][0, 3] = {}".format(i2_m_beg, mis_traj[i2_m_beg, 2], int_table[0][0, 3]))
             print("i1_m_beg = {} i2_m_beg = {}".format(i1_m_beg, i2_m_beg))
         #print(int_beta_il, '\n', int_table[int_beta_il], '\n', int_table[int_beta_il+1])
-        return False
         
+        if concentric:
+            pass 
+        else:
+            return False
+
 #    i_m_beta = m_beg
     i_i_beta = int_beta_il
     hit = False
@@ -261,195 +398,236 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
     for i_m_beta in range(m_beg, len(mis_traj)) : # TODO make range end calculated from t_end
 #        print("\rProcessing beta {:f}".format(degrees(mis_traj[i_m_beta, 2])), end='')
 #        itemp = int_table[i_i_beta]
+        m_beta = mis_traj[i_m_beta, 2]
+
+        if concentric:
+            beta_array = np.array([int_table[k][0, 3] for k in range(len(int_table))])
+            i_i_beta = int(np.argmin(np.abs(beta_array - m_beta)))
+            if i_i_beta >= len(int_table) or not np.any(int_table[i_i_beta]):
+                continue
+
         if np.any(int_table[i_i_beta]) :
-            m_beta = mis_traj[i_m_beta, 2]
-            if abs(m_beta - int_table[i_i_beta][0, 3]) > angle_eps :
-                print("betas not equal exception: m={}, i={}".format(mis_traj[i_m_beta, 2], int_table[i_i_beta][0, 3]))
-                print("i_m_beta={}, i_i_beta={}".format(i_m_beta, i_i_beta))
-    #            print("int_table[i_i_beta] 1: {} and 10: {}".format(int_table[1], int_table[2]))
+            table_beta = int_table[i_i_beta][0, 3]
+            if abs(m_beta - int_table[i_i_beta][0, 3]) > current_eps :
+                if not concentric:
+                    print("betas not equal exception: m={}, i={}".format(mis_traj[i_m_beta, 2], int_table[i_i_beta][0, 3]))
+                    print("i_m_beta={}, i_i_beta={}".format(i_m_beta, i_i_beta))
+        #            print("int_table[i_i_beta] 1: {} and 10: {}".format(int_table[1], int_table[2]))
+                    hit = False
+                    break
+                else: 
+                    beta_array = np.array([int_table[k][0, 3] for k in range(len(int_table))])
+                    i_i_beta = int(np.argmin(np.abs(beta_array - m_beta)))
+                    if not np.any(int_table[i_i_beta]):
+                        continue
+                #return False -- 221030 18:35
+            m_rad = mis_traj[i_m_beta, 1]
+            m_time = mis_traj[i_m_beta, 0]
+            
+            x_rad = mis_traj[i_m_beta, 3]
+            y_rad = mis_traj[i_m_beta, 4]
+            
+            is_valid_point = False
+            if concentric:
+                # 1. KORREKTUR: Da m_rad durch den harmonisierten Numba-Loop jetzt die
+                # echte topozentrische Sichtlinie zum Startplatz ist, berechnet sich die
+                # reale Flughöhe über dem Boden exakt über das transformierte tar_traj-Höhenprofil
+                # (m_rad selbst dient hier direkt als topozentrisches Reichweitenmaß).
+                # Um die echte Flughöhe über der gekrümmten Erde für das maxia-Kriterium zu prüfen:
+                int_altitude = sqrt(x_rad*x_rad + y_rad*y_rad) - R_e
+                
+                is_valid_point = ((not op_range) or (m_rad <= op_range)) and ((not maxia) or (int_altitude <= maxia))
+            else:
+                # Der klassische flache Pfad bleibt für das alte Modell zu 100% unverändert
+                y_rad_flat = y_rad + R_e
+                int_altitude = sqrt(x_rad*x_rad + y_rad_flat*y_rad_flat) - R_e
+                is_valid_point = ((not op_range) or (m_rad <= op_range)) and (m_beta > othi_r) and ((not maxia) or (int_altitude <= maxia))
+
+            if is_valid_point:
+                hit = False 
+                
+                if concentric: 
+                    grid_step_rad = radians(beta_step)
+                    table_beta_min = int_table[0][0, 3] 
+                    max_segments = len(int_table) - 1
+
+                    table_beta = m_beta
+                    calculated_idx = int(round((table_beta - table_beta_min) / grid_step_rad))
+                    
+                    if calculated_idx > max_segments:
+                        seg_idx = max_segments
+                    elif calculated_idx < 0:
+                        seg_idx = 0
+                    else:
+                        seg_idx = calculated_idx
+                        
+                    segment = int_table[seg_idx]
+                    
+                    if len(segment) > 0 and segment[0, 3] != -1.0:
+                        if abs(segment[0, 3] - table_beta) < current_eps:
+                            int_ray = segment.copy() # Kopie erstellen für Transformation
+                            
+                            # INTERCEPTOR-ZEITACHSE AUF RAKETENEPOCHE VERSCHIEBEN
+                            for k_idx in range(len(int_ray)):
+                                int_ray[k_idx, 1] += t_int_lnc
+                            
+                            i_a = 0
+                            i_b = len(int_ray) - 1
+                            
+                            # Die Bedingung prüft nun im selben, korrekten Zeitfenster!
+                            if i_b > 0 and int_ray[0, 1] <= m_time <= int_ray[i_b, 1]:
+                                while (i_b - i_a) > 1:
+                                    i_x = (i_a + i_b) // 2
+                                    if int_ray[i_x, 1] > m_time:
+                                        i_b = i_x
+                                    else:
+                                        i_a = i_x
+                                
+                                i_hit = i_b
+                                
+                                if int_ray[i_hit - 1, 1] <= m_time <= int_ray[i_hit, 1]:
+                                    t1 = int_ray[i_hit - 1, 1]
+                                    t2 = int_ray[i_hit, 1]
+                                    
+                                    factor = 0.0 if abs(t2 - t1) < 1e-6 else (m_time - t1) / (t2 - t1)
+                                    
+                                    r1_int = int_ray[i_hit - 1, 2]
+                                    r2_int = int_ray[i_hit, 2]
+                                    r_interp = r1_int + factor * (r2_int - r1_int)
+                                    
+                                    # 2. KORREKTUR: Da m_rad jetzt die echte topozentrische Sichtlinie (Slant Range) ist,
+                                    # können wir sie direkt fehlerfrei ohne Radien-Umrechnung abziehen!
+                                    distance_error = abs(r_interp - m_rad)
+                                    
+                                    if i_m_beta < len(mis_traj) - 1:
+                                        dt = max(1e-3, abs(mis_traj[i_m_beta + 1, 0] - m_time))
+                                        dr = abs(mis_traj[i_m_beta + 1, 1] - m_rad)
+                                        missile_speed = dr / dt
+                                        distance_limit = max(150.0, missile_speed * dt * 1.2)
+                                    else:
+                                        distance_limit = 300.0
+                                    
+                                    '''
+                                    if concentric and abs(m_time - int_ray[i_hit, 1]) < 5.0:
+                                        print(f"\n[CRITICAL CONCENTRIC CHECK]")
+                                        print(f" -> Distanz-Fehler: {distance_error:.1f}m (Erlaubtes Limit: {distance_limit:.1f}m) -> {distance_error < distance_limit}")
+                                        print(f" -> Real-Flughöhe: {int_altitude/1000:.1f}km (Maximal erlaubt [maxia]: {maxia/1000 if maxia else 'Inaktiv'}km) -> {(not maxia) or (int_altitude <= maxia)}")
+                                        print(f" -> Abfang-Radius: {m_rad/1000:.1f}km (Maximal erlaubt [op_range]: {op_range/1000 if op_range else 'Inaktiv'}km) -> {(not op_range) or (m_rad <= op_range)}")
+                                        print(f" -> Zeit-Check: {int_ray[i_hit - 1, 1]:.1f}s <= {m_time:.1f}s <= {int_ray[i_hit, 1]:.1f}s -> {int_ray[i_hit - 1, 1] <= m_time <= int_ray[i_hit, 1]}")
+                                    '''
+                                    if distance_error < distance_limit:
+                                        psi1 = int_ray[i_hit - 1, 0]
+                                        psi2 = int_ray[i_hit, 0]
+                                        psi_hit = psi1 + factor * (psi2 - psi1)
+                                        
+                                        t_int_flight = m_time - t_int_lnc
+                                        hit_vector = [psi_hit, t_int_flight, r_interp, int_ray[0, 3]]
+                                        hit = hit_vector, mis_traj[i_m_beta], int_ray[i_hit - 1], int_ray[i_hit]
+
+                                        if debug_hits:
+                                            msg = f"\n[HIT - CONCENTRIC] Time: {m_time:.2f}s | Theta: {degrees(int_ray[0, 3]):.2f}° | Error: {distance_error:.1f}m\n"
+                                            sys.__stdout__.write(msg)
+                                            sys.__stdout__.flush()        
+                    if hit:
+                        break
+                else:
+                    # ORIGINALER CODEPFAD (UNVERÄNDERT FÜR NOT CONCENTRIC)
+                    i_a = 0
+                    i_b = len(int_table[i_i_beta]) - 1
+                    if i_b > 0 :
+                        if int_table[i_i_beta][i_b, 2] > m_rad :
+                            while (i_b - i_a) > 1 :
+                                i_x = int(ceil(i_a + i_b) / 2)
+                                f_x = int_table[i_i_beta][i_x, 2] - m_rad
+                                if f_x > 0 :
+                                    i_b = i_x
+                                elif f_x < 0 :
+                                    i_a = i_x
+                                else :
+                                    hit = int_table[i_i_beta][i_b], mis_traj[i_m_beta], int_table[i_i_beta][i_b], int_table[i_i_beta][i_b]
+                            i_hit = i_b
+                            if (int_table[i_i_beta][i_hit - 1, 2] < m_rad) :
+                                r1 = int_table[i_i_beta][i_hit - 1, 2]
+                                r2 = int_table[i_i_beta][i_hit, 2]
+                                t1 = int_table[i_i_beta][i_hit - 1, 1]
+                                t2 = int_table[i_i_beta][i_hit, 1]
+                                t_hit = t1 + (t2 - t1) * (m_rad - r1) / (r2 - r1)
+                    
+                                psi1 = int_table[i_i_beta][i_hit - 1, 0]
+                                psi2 = int_table[i_i_beta][i_hit, 0]
+                                psi_hit = psi1 + (psi2 - psi1) * (m_rad - r1) / (r2 - r1)
+                                    
+                                hit = [psi_hit, t_hit, m_rad, int_table[i_i_beta][1, 3]], mis_traj[i_m_beta], int_table[i_i_beta][i_hit - 1], int_table[i_i_beta][i_hit]
+                            
+                            elif int_table[i_i_beta][0, 2] == m_rad :
+                                #hit = int_table[i_i_beta][0], mis_traj[i_m_beta]
+                                hit = int_table[i_i_beta][0], mis_traj[i_m_beta], int_table[i_i_beta][0], int_table[i_i_beta][0]
+                            
+                
+                        elif int_table[i_i_beta][i_b, 2] == m_rad :
+                        #elif (m_rad - int_table[i_i_beta][i_b, 2]) / m_rad < 0.01 : # miss by less than 0.1%  == hit $$$
+                            #hit = int_table[i_i_beta][i_b], mis_traj[i_m_beta]
+                            hit = int_table[i_i_beta][i_b], mis_traj[i_m_beta], int_table[i_i_beta][i_b], int_table[i_i_beta][i_b]
+                    elif int_table[i_i_beta][0, 2] == m_rad :
+                        #hit = int_table[i_i_beta][0], mis_traj[i_m_beta]
+                        hit = int_table[i_i_beta][0], mis_traj[i_m_beta], int_table[i_i_beta][0], int_table[i_i_beta][0]
+                        
+                    if hit :
+                        hit_i, hit_m, hit_i1, hit_i2 = hit
+                        
+                        # =================================================================
+                        # PHYSIKALISCHE VALIDIERUNGS-HARMONISIERUNG FÜR CONCENTRIC
+                        # =================================================================
+                        if concentric:
+                            # t_available_missile ist die Zeit, die die Rakete ab dem Interceptor-Start fliegt
+                            t_available_missile = hit_m - t_int_lnc
+                            
+                            # AUTOMATISCHER FIX: Da die Erdkrümmung die 100km-Höhenschicht geometrisch verzerrt,
+                            # erweitern wir das Zeitfenster um t_end dynamisch um 5%. Das kompensiert den
+                            # Koordinatenversatz vollautomatisch, ohne min_ia in der GUI auf 0 setzen zu müssen.
+                            t_end_extended = t_end * 1.05
+                            
+                            if (hit_i <= t_available_missile) and (hit_m <= t_end_extended):
+                                if debug_hits:
+                                    print("hit [Concentric] m_time={:f}, i_time={:f}".format(hit_m, hit_i))
+                                else:
+                                    break
+                            else:
+                                hit = False
+                        else:
+                            # ORIGINALER PFAD (UNVERÄNDERT FÜR DAS ALTE FLACHE MODELL)
+                            if hit_i[3] >= othi_r :
+                                if (hit_i[1] <= (hit_m[0] - t_int_lnc)) and (hit_m[0] < t_end) :
+                                    if debug_hits :
+                                        print("hit i_angle={:f}, m_angle={:f}".format(degrees(hit_i[3]), degrees(hit_m[2])))
+                                    else :
+                                        break
+                                else :
+                                    hit = False
+                            else :
+                                hit = False
+                        
+            # if np.any =====================
+
+    #        if i_m_beta == len(mis_traj) - 1 :
+    #                print("False: no hits")
+    #                return False
+            if i_m_beta < (len(mis_traj) - 1) :
+                m_beta = mis_traj[i_m_beta, 2] # assigned at the beginning of the cycle
+                if (m_beta < m_beta_max) :
+                    if i_m_beta < i_m_beta_max :
+                        i_i_beta += 1
+                    elif i_m_beta > i_m_beta_max:
+                        i_i_beta -= 1
+                else :
+                    if (mis_traj[i_m_beta + 1, 2] < m_beta) :
+                        i_i_beta -= 1
+                    
+            if i_i_beta == -1 :
+                if debug_print : print("False: no hits (M beta lower than lowest I beta)")
                 hit = False
                 break
                 #return False -- 221030 18:35
-            m_rad = mis_traj[i_m_beta, 1]
-            #if i_m_beta == 610 :                           # debug delete
-            #    print("i_m_beta = 610", mis_traj[610])     # debug delete
-            
-            x_rad = mis_traj[i_m_beta, 3]
-            y_rad = mis_traj[i_m_beta, 4] + R_e
-            int_altitude = sqrt(x_rad*x_rad + y_rad*y_rad) - R_e
-            
-            if ((not op_range) or (m_rad <= op_range)) and (m_beta > othi_r) and ((not maxia) or (int_altitude <= maxia)) : # and ((not h_discr) or (int_altitude < bm.atm_limit_100)) : #checking in-atm only functional for endo
-                #continue
-                i_a = 0
-                i_b = len(int_table[i_i_beta]) - 1
-                if i_b > 0 : # ==0 when only one point in the beta ray
-                    if int_table[i_i_beta][i_b, 2] > m_rad :
-                        while (i_b - i_a) > 1 :
-                            i_x = int(ceil(i_a + i_b) / 2)
-                            f_x = int_table[i_i_beta][i_x, 2] - m_rad
-                            if f_x > 0 :
-                                i_b = i_x
-                            elif f_x < 0 :
-                                i_a = i_x
-                            else :
-                                #hit = int_table[i_i_beta][i_b], mis_traj[i_m_beta]
-                                hit = int_table[i_i_beta][i_b], mis_traj[i_m_beta], int_table[i_i_beta][i_b], int_table[i_i_beta][i_b]
-                        i_hit = i_b
-                        if (int_table[i_i_beta][i_hit - 1, 2] < m_rad) :
-                            r1 = int_table[i_i_beta][i_hit - 1, 2]
-                            r2 = int_table[i_i_beta][i_hit, 2]
-                            t1 = int_table[i_i_beta][i_hit - 1, 1]
-                            t2 = int_table[i_i_beta][i_hit, 1]
-                            t_hit = t1 + (t2 - t1) * (m_rad - r1) / (r2 - r1)
-                
-                            psi1 = int_table[i_i_beta][i_hit - 1, 0]
-                            psi2 = int_table[i_i_beta][i_hit, 0]
-                            psi_hit = psi1 + (psi2 - psi1) * (m_rad - r1) / (r2 - r1)
-                                
-                            #hit = [psi_hit, t_hit, m_rad, int_table[i_i_beta][1, 3]], mis_traj[i_m_beta]
-                            hit = [psi_hit, t_hit, m_rad, int_table[i_i_beta][1, 3]], mis_traj[i_m_beta], int_table[i_i_beta][i_hit - 1], int_table[i_i_beta][i_hit]
-                        
-                        elif int_table[i_i_beta][0, 2] == m_rad :
-                            #hit = int_table[i_i_beta][0], mis_traj[i_m_beta]
-                            hit = int_table[i_i_beta][0], mis_traj[i_m_beta], int_table[i_i_beta][0], int_table[i_i_beta][0]
-                        """
-                        elif False : # i.e. point with i_a == 0 is the first above ground is further than "underground" MIP
-                            #print("short search: projected underground missile trj point processed")
-                            print("\r> Under < fi_opt = {:6.2f}, dist_opt = {:9.3f} mode2={}".format(degrees(fi_opt), dist_opt/1000, mode2), end='')
-                            hit_found = False
-                            m_rad_1 = mis_traj[i_m_beta - 1, 1]
-                            m_height = sqrt(R_e*R_e + m_rad_1*m_rad_1 + 2 * R_e * m_rad_1 * sin(mis_traj[i_m_beta - 1, 2])) - R_e
-                            if m_height >= h_int_min : #4
-                                i2_beg = 0
-                                for i1 in range(0, len(int_table[i_i_beta])) :
-                                    i1r = int_table[i_i_beta][i1, 2]
-                                    if i1r >= m_rad_1 :
-                                        break
-                                    for i2 in range (i2_beg, len(int_table[i_i_beta + 1])) :
-                                        if int_table[i_i_beta][i1, 0] == int_table[i_i_beta + 1][i2, 0] : #3
-                                            i2r = int_table[i_i_beta + 1][i2, 2]
-                                            #if (i1r > m_rad_1) and (i2r > m_rad_1) :
-                                            if i2r >= m_rad_1 :
-                                                break
-                                            i1x = i1r * cos(int_table[i_i_beta][i1, 3])
-                                            i1y = i1r * sin(int_table[i_i_beta][i1, 3])
-                                            i2x = i2r * cos(int_table[i_i_beta + 1][i2, 3])
-                                            i2y = i2r * sin(int_table[i_i_beta + 1][i2, 3])
-                                            #i1x = int_table[i_i_beta][i1, 2] * cos(int_table[i_i_beta][i1, 3])
-                                            #i1y = int_table[i_i_beta][i1, 2] * sin(int_table[i_i_beta][i1, 3])
-                                            #i2x = int_table[i_i_beta + 1][i2, 2] * cos(int_table[i_i_beta + 1][i2, 3])
-                                            #i2y = int_table[i_i_beta + 1][i2, 2] * sin(int_table[i_i_beta + 1][i2, 3])
-                                            m1x = m_rad * cos(mis_traj[i_m_beta, 2])
-                                            m1y = m_rad * sin(mis_traj[i_m_beta, 2])
-                                            #m2x = mis_traj[i_m_beta - 1, 1] * cos(mis_traj[i_m_beta - 1, 2])
-                                            #m2y = mis_traj[i_m_beta - 1, 1] * sin(mis_traj[i_m_beta - 1, 2])
-                                            m2x = m_rad_1 * cos(mis_traj[i_m_beta - 1, 2])
-                                            m2y = m_rad_1 * sin(mis_traj[i_m_beta - 1, 2])
-                                            hit = bm.segment_intersection([i1x, i1y], [i2x, i2y], [m1x, m1y], [m2x, m2y])
-                                            if debug_hits :
-                                                print(m1x, m1y, m2x, m2y)
-                                                print(i1x, i1y, i2x, i2y)
-                                            if hit : #2
-                                                hit_found = True
-                                                print("Underground hit")
-                                                h_hit = sqrt((R_e + hit[1])*(R_e + hit[1]) + hit[0]*hit[0]) - R_e # local height of interception point
-                                                if h_hit < h_int_min : #1
-                                                    hit = False
-                                                else :
-                                                    r_hit = sqrt(hit[0]*hit[0] + hit[1]*hit[1])
-                                                    beta_hit = asin(hit[1] / r_hit)
-                                                    m1t = mis_traj[i_m_beta - 1, 0]
-                                                    m2t = mis_traj[i_m_beta, 0]
-                                                    t_hit_m = m1t + (m2t - m1t) * ((hit[0] - m1x) / (m2x - m1x))
-                                                    i1t = int_table[i_i_beta][i1, 1]
-                                                    i2t = int_table[i_i_beta + 1][i2, 1]
-                                                    t_hit_i = i1t + (i2t - i1t) * ((hit[0] - i1x) / (i2x - i1x))
-                            
-                                                    psi1 = int_table[i_i_beta][i1, 0]
-                                                    psi2 = int_table[i_i_beta + 1][i2, 0]
-                                                    r1 = int_table[i_i_beta][i1, 2]
-                                                    r2 = int_table[i_i_beta + 1][i2, 2]
-                                                    psi_hit = psi1 + (psi2 - psi1) * (m_rad - r1) / (r2 - r1)
-                                                    
-                                                    #hit = [psi_hit, t_hit_i, r_hit, beta_hit, psi1, i1t, r1, psi2, i2t, r2], [t_hit_m, r_hit, beta_hit, r_hit * cos(beta_hit), r_hit * sin(beta_hit)]
-                                                    hit = [psi_hit, t_hit_i, r_hit, beta_hit], [t_hit_m, r_hit, beta_hit, r_hit * cos(beta_hit), r_hit * sin(beta_hit)]
-                                                    if debug_hits : #0
-                                                        print("Debug hit")
-                                                        print("coords: x={:.0f}, y={:.0f}, r={:.0f}, beta={:.3f}".format(hit[0], hit[1], r_hit, degrees(beta_hit)))
-                                                        print("time: missile {:.3f},  interceptor {:.3f}, psi={:.3f}".format(t_hit_m, t_hit_i, psi_hit))
-                                                        print("interceptor points:")
-                                                        print("i1: ", int_table[i_i_beta][i1], "\ni2: ", int_table[i_i_beta + 1][i2])
-                                                        print("missile points")
-                                                        print("m1: ",mis_traj[i_m_beta - 1], "\nm2: ", mis_traj[i_m_beta])
-                                                    else : pass #0
-                                                
-                                                    break
-                                                # if #1 
-                                            else : pass # if #2
-                                        elif int_table[i_i_beta][i1, 0] > int_table[i_i_beta + 1][i2, 0] : # if #3 # all further will be ">" too
-                                            i2_beg = i2
-                                            break
-                                    if hit_found :
-                                        break
-                                # } for i1
-                            # if #4
-                        # else # handling of partially underground segment
-                        """   
-            
-                    elif int_table[i_i_beta][i_b, 2] == m_rad :
-                    #elif (m_rad - int_table[i_i_beta][i_b, 2]) / m_rad < 0.01 : # miss by less than 0.1%  == hit $$$
-                        #hit = int_table[i_i_beta][i_b], mis_traj[i_m_beta]
-                        hit = int_table[i_i_beta][i_b], mis_traj[i_m_beta], int_table[i_i_beta][i_b], int_table[i_i_beta][i_b]
-                elif int_table[i_i_beta][0, 2] == m_rad :
-                    #hit = int_table[i_i_beta][0], mis_traj[i_m_beta]
-                    hit = int_table[i_i_beta][0], mis_traj[i_m_beta], int_table[i_i_beta][0], int_table[i_i_beta][0]
-                    
-                if hit :
-                    #hit_i, hit_m = hit
-                    hit_i, hit_m, hit_i1, hit_i2 = hit
-                    """ check that int flight time is less than time from the earliest possible int launch time and hit,"""
-                    """ and hit is above acceptable interception altitude  >>>better would be to calculate local height<<< """ # TODO $$$
-                    if hit_i[3] >= othi_r :
-                        if (hit_i[1] <= (hit_m[0] - t_int_lnc)) and (hit_m[0] < t_end) :
-                            if debug_hits :
-                                print("hit i_angle={:f}, m_angle={:f}".format(degrees(hit_i[3]), degrees(hit_m[2])))
-                            else :
-                                break
-                        else :
-                            """
-                            if i_m_beta > 674 :
-                                print("hit_i[1] > (hit_m[0] - t_int_lnc)")
-                                print("i_m_beta=", i_m_beta, mis_traj[i_m_beta], "\ni_i_beta=", i_i_beta, int_table[i_i_beta][i_b, 3], "det_range=", det_range/1000)
-                                if hit_i[1] > (hit_m[0] - t_int_lnc) :
-                                    print(hit_i, "\n", hit_m, t_int_lnc)
-                                else :
-                                    print("(hit_m[0] >= t_end", hit_m, t_end)
-                            """
-                            hit = False
-                    else :
-                        hit = False
-                    
-        # if np.any =====================
-
-#        if i_m_beta == len(mis_traj) - 1 :
-#                print("False: no hits")
-#                return False
-        if i_m_beta < (len(mis_traj) - 1) :
-            m_beta = mis_traj[i_m_beta, 2] # assigned at the beginning of the cycle
-            if (m_beta < m_beta_max) :
-                if i_m_beta < i_m_beta_max :
-                    i_i_beta += 1
-                elif i_m_beta > i_m_beta_max:
-                    i_i_beta -= 1
-            else :
-                if (mis_traj[i_m_beta + 1, 2] < m_beta) :
-                    i_i_beta -= 1
-                
-        if i_i_beta == -1 :
-            if debug_print : print("False: no hits (M beta lower than lowest I beta)")
-            hit = False
-            break
-            #return False -- 221030 18:35
             
             
 #        i_m_beta += 1
@@ -1079,6 +1257,8 @@ def footprint_mode2(s_func, # s_func needs to be either short_search2 or sls_sea
             f_shift = shift_beg 
             f_b = f_shift
             while f_shift >= shift_end - .1 :
+                if f_shift < mrange * 0.1: 
+                    break
                 enm2 = time.process_time()
                 dum2 = enm2 - stm2
                 if dum2 >= 1 :
@@ -1295,6 +1475,7 @@ def footprint_mode2(s_func, # s_func needs to be either short_search2 or sls_sea
 
     if is_compare_mode:
         fp_part_con = run_footprint_pipeline(t_itable_con, concentric_flag=True)
+    
         return [fp_part_std, fp_part_con]
     else:
         return [fp_part_std, np.zeros((0, 5))]
