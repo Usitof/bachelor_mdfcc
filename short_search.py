@@ -161,8 +161,8 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
 
     # dist_opt is the metric distance between ILP and MLP (in meters)
     # fi_opt is the flight path plane aspect angle (phi)
-    print("dist_opt: ", dist_opt)
-    print("fi_opt: ", fi_opt)
+    # print("dist_opt: ", dist_opt)
+    # print("fi_opt: ", fi_opt)
     psi_d = degrees(dist_opt / R_e)
     phi_d = degrees(fi_opt)
 
@@ -269,7 +269,7 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
                       f"liegt außerhalb der Abfangtabelle ({degrees(table_beta_min):.2f}° - {degrees(table_beta_max):.2f}°)")
             return False
         
-        print(f"\n[DEBUG CONCENTRIC] Rakete beta_il (deg): {degrees(beta_il):.2f} | Best Match Tabelle (deg): {degrees(int_table[int_beta_il][0, 3]):.2f}")
+        # print(f"\n[DEBUG CONCENTRIC] Rakete beta_il (deg): {degrees(beta_il):.2f} | Best Match Tabelle (deg): {degrees(int_table[int_beta_il][0, 3]):.2f}")
     else:
 
         # Originaler Suchalgorithmus für das flache 2D-Modell
@@ -320,14 +320,14 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
     except Exception as e:
         int_flight_time = f"Err ({str(e)})"
 
-    print(f"[TIME-ALT CHECK] Winkel: {degrees(beta_il):.2f}° | Raketen-Zeit: {mis_traj[m_beg, 0]:.1f}s | Interceptor-Flugzeit: {int_flight_time}s")
+    # print(f"[TIME-ALT CHECK] Winkel: {degrees(beta_il):.2f}° | Raketen-Zeit: {mis_traj[m_beg, 0]:.1f}s | Interceptor-Flugzeit: {int_flight_time}s")
 
 
     int_beta_il = 0 # index of the same beta in interception table
     max_valid_index = len(int_table) - 1
 
     grid_step_rad = np.radians(fcc_constants.beta_step)
-    current_eps = (grid_step_rad * 1.5) if concentric else angle_eps
+    current_eps = (grid_step_rad * 4) if concentric else angle_eps
 
     if concentric:
         table_beta_min = int_table[0][0, 3]
@@ -344,9 +344,9 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
         calculated_idx = max(0, min(calculated_idx, max_valid_index))
 
         int_beta_il = calculated_idx
-        current_eps = grid_step_rad * 1.5
+        current_eps = grid_step_rad * 4
         
-        print(f"\n[DEBUG CONCENTRIC] Rakete beta_il (deg): {degrees(beta_il):.2f} | Best Match Tabelle (deg): {degrees(int_table[int_beta_il][0, 3]):.2f}")
+        # print(f"\n[DEBUG CONCENTRIC] Rakete beta_il (deg): {degrees(beta_il):.2f} | Best Match Tabelle (deg): {degrees(int_table[int_beta_il][0, 3]):.2f}")
 
 
     else:
@@ -434,7 +434,8 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
                 # reale Flughöhe über dem Boden exakt über das transformierte tar_traj-Höhenprofil
                 # (m_rad selbst dient hier direkt als topozentrisches Reichweitenmaß).
                 # Um die echte Flughöhe über der gekrümmten Erde für das maxia-Kriterium zu prüfen:
-                int_altitude = sqrt(x_rad*x_rad + y_rad*y_rad) - R_e
+                geo_radius_sq = fcc_constants.R_e**2 + m_rad**2 + 2.0 * fcc_constants.R_e * y_rad
+                int_altitude = sqrt(max(0.0, geo_radius_sq)) - fcc_constants.R_e
                 
                 is_valid_point = ((not op_range) or (m_rad <= op_range)) and ((not maxia) or (int_altitude <= maxia))
             else:
@@ -1068,11 +1069,18 @@ def footprint_mode2(s_func, # s_func needs to be either short_search2 or sls_sea
                 t_itable_con = None
                 ) :
 
+    if t_itable_con is not None:
+        num_dist_internal = max(num_dist * 4, 60)
+        t_acc_internal = max(t_acc, 0.005)
+    else:
+        num_dist_internal = num_dist
+        t_acc_internal = t_acc
+
     fp_calc_param = 3
     stop_par = 10
     is_compare_mode = t_itable_con is not None
 
-    def fp_part_calc_v3(fp_front, fp_back, num_steps=num_dist, concentric=False) :
+    def fp_part_calc_v3(fp_front, fp_back, num_steps=num_dist_internal, concentric=False) :
         """
         v3 -- calculates footprint border point (omega) for each shift, as well as 
         all points from omega of previous shift to the current omega, spaced by angle_step
@@ -1088,7 +1096,17 @@ def footprint_mode2(s_func, # s_func needs to be either short_search2 or sls_sea
         
         shift_beg = fp_front
         shift_end = fp_back
-        shift_step = (shift_end - shift_beg) / num_steps
+        
+        if concentric:
+            alpha_beg = shift_beg / R_e
+            alpha_end = shift_end / R_e
+            
+            alpha_step = (alpha_end - alpha_beg) / num_steps
+            
+            shift_step = alpha_step * R_e
+        else:
+            shift_step = (shift_end - shift_beg) / num_steps
+
         
         f_shift = shift_beg
 
@@ -1118,7 +1136,7 @@ def footprint_mode2(s_func, # s_func needs to be either short_search2 or sls_sea
                         f_a = f_x
                     else :
                         f_b = f_x
-                    if (abs(f_b - f_a) < f_b  * t_acc) or (abs(f_b - f_a) < stop_ang_par) :
+                    if (abs(f_b - f_a) < f_b  * t_acc_internal) or (abs(f_b - f_a) < stop_ang_par) :
                         break
                 fill_line = True
                 if f_b == t_ang_end :
@@ -1145,18 +1163,28 @@ def footprint_mode2(s_func, # s_func needs to be either short_search2 or sls_sea
                             i_shift = f_shift
                         else :
                             i_shift = f_shift - shift_step + shift_step * (i + 1) / f_x_num
+                        target_shift = i_shift if concentric else f_shift
                         x, y = omegashift_2_xy(f_x_i, i_shift, mrange)                
                         if i == f_x_num - 1 :
-                            fp_part = np.append(fp_part, [[f_x_i, i_shift, f_b - f_a, x, y]], axis=0) 
+                            fp_part = np.append(fp_part, [[f_x_i, target_shift, f_b - f_a, x, y]], axis=0) 
                         else :
-                            fp_part = np.append(fp_part, [[f_x_i, i_shift, 1, x, y]], axis=0)         
+                            fp_part = np.append(fp_part, [[f_x_i, i_shift, 1, x, y]], axis=0)        
 
                 f_x_keep = f_a
                 f_x = f_a                    
 
             else : 
-                f_b = f_x
-                f_a = t_ang_beg
+                if concentric:
+                    f_b = f_x
+                    f_a = max(t_ang_beg, f_x_keep - radians(2.0))
+                else:
+                    f_b = f_x
+                    f_a = t_ang_beg
+
+                try:
+                    current_acc = t_acc_internal
+                except NameError:
+                    current_acc = max(t_acc, 0.005) if concentric else t_acc
 
                 while True : 
                     f_x = f_a + (f_b - f_a) / 2
@@ -1165,8 +1193,10 @@ def footprint_mode2(s_func, # s_func needs to be either short_search2 or sls_sea
                         f_a = f_x
                     else :
                         f_b = f_x
-                    if (abs(f_b - f_a) < f_b  * t_acc) or (abs(f_b - f_a) < stop_ang_par) : 
+                    
+                    if (abs(f_b - f_a) < f_b  * current_acc) or (abs(f_b - f_a) < stop_ang_par) : 
                         break
+
                 f_x_num =  round(abs(f_a - f_x_keep) / ang_quant_r)
                 if not f_x_num :
                     f_x_num = 1
@@ -1226,6 +1256,37 @@ def footprint_mode2(s_func, # s_func needs to be either short_search2 or sls_sea
                 fp_part = np.append(fp_part, [fp_part_if], axis=0)
                 fp_part[len_fp_part + i_f, 0] = - fp_part_if[0]
                 fp_part[len_fp_part + i_f, 3] = - fp_part_if[3]
+        
+            if concentric:
+                # Wir berechnen für jeden generierten Punkt die euklidische Distanz zum Zentrum
+                # und entfernen alle inneren 'Rippel-Punkte'. Matplotlib wird dadurch gezwungen,
+                # die Punkte exakt entlang Ihrer gezeichneten grünen Außenlinie zu verbinden!
+                cx = np.mean(fp_part[:, 3])
+                cy = np.mean(fp_part[:, 4])
+                
+                # Sektorenweise Filterung: Wir unterteilen die Form in feine Winkelsegmente
+                angles = np.arctan2(fp_part[:, 4] - cy, fp_part[:, 3] - cx)
+                angles_deg = np.round(np.degrees(angles), 0)
+                unique_angles = np.unique(angles_deg)
+                
+                cleaned_fp = []
+                for ua in unique_angles:
+                    mask = (angles_deg == ua)
+                    candidates = fp_part[mask]
+                    if len(candidates) > 0:
+                        # Berechne Radius zum Schwerpunkt
+                        radii = np.sqrt((candidates[:, 3] - cx)**2 + (candidates[:, 4] - cy)**2)
+                        # Nur den absolut äußersten Punkt des Segments behalten (Ihre grüne Kurve!)
+                        cleaned_fp.append(candidates[np.argmax(radii)])
+                
+                # Neu sortieren für einen glatten, ununterbrochenen Linienzug
+                fp_part = np.array(cleaned_fp)
+                final_angles = np.arctan2(fp_part[:, 4] - cy, fp_part[:, 3] - cx)
+                fp_part = fp_part[final_angles.argsort()]
+                
+                # Den Ring sauber schließen, indem der Kreis geschlossen wird
+                fp_part = np.vstack((fp_part, fp_part[0:1]))
+
         else :
             print("\nFootprint not calculated, check input data")
             fp_part = np.zeros((0, 5))
@@ -1367,10 +1428,29 @@ def footprint_mode2(s_func, # s_func needs to be either short_search2 or sls_sea
                     f_y_keep = f_xy
                 else :
                     f_b = f_x
-                if ((f_a - f_b) < (f_a - mrange) * t_acc) or ((f_a - f_b) < stop_par) : 
+                
+                if concentric_flag:
+                    dynamic_stop = max(stop_par, (abs(f_x) / R_e) * stop_par * 10.0)
+                else:
+                    dynamic_stop = stop_par
+
+                if ((f_a - f_b) < (f_a - mrange) * t_acc) or (abs(f_a - f_b) < dynamic_stop) : 
                     break
             fp_back1 = f_a
-            print("\rBack  edge of the footprint found, location = {:.0f} km relative to ILP, looking for the footprint's second part...".format((f_a - mrange)/1000))
+            print("\rBack  edge of the footprint found, location = {:.0f} km relative to ILP.".format((f_a - mrange)/1000))
+
+            # === SÄUBERUNG DER SINGULARITÄT OHNE GEOMETRIE-BRUCH ===
+            # dist_step ist negativ -> wir prüfen einen Schritt weiter hinten (deeper downrange)
+            f_probe = f_a + (2.0 * dist_step) 
+            artifact_check = s_func(t_trj, current_table, h_min, maxia, t_lnc, 0, f_probe, op_range, det_range, t_delay, h_discr, concentric=concentric_flag)
+            
+            if concentric_flag and artifact_check:
+                # Die Lücke ist ein Artefakt -> Wir berechnen Teil 2 ganz normal bis zur echten 
+                # physikalischen Rückkante (-517 km), fusionieren beide Teile aber am Ende!
+                print("[MDFCC] Micro-gap detected. Will be seamlessly fused in post-processing.")
+                fp_single = False
+            else:
+                print(" Looking for the footprint's second part...")
 
             if plot_hit_charts and i_type :
                 if f_a == dist_limit : 
@@ -1402,7 +1482,7 @@ def footprint_mode2(s_func, # s_func needs to be either short_search2 or sls_sea
             print("\rProcessing distance complete", end='')
 
             if not f_ok :
-                print('\rNo second part of footprint found behind the first part.\nIncreasing "Mode 2 Footprint number of steps" might help to find one.')
+                print('\rNo second part of footprint found behind the first part.')
                 fp_single = True
             else :
                 while True :
@@ -1416,13 +1496,10 @@ def footprint_mode2(s_func, # s_func needs to be either short_search2 or sls_sea
                     if (abs(f_a - f_b) < abs(f_b - mrange) * t_acc) or (abs(f_a - f_b) < stop_par) : 
                         break
                 fp_front2 = f_b
-                print("\rFront edge of the second part of the footprint found, location = {:.0f} km relative to ILP, looking for the back edge...".format((f_b - mrange)/1000))
+                print("\rFront edge of the second part found, location = {:.0f} km relative to ILP.".format((f_b - mrange)/1000))
 
                 if plot_hit_charts and i_type :
-                    if f_a == dist_limit : 
-                        fp.plot_hit2(f_ok, t_trj, m_type, i_type, 0, f_a, int_max_range/1000, op_range, det_range, t_lnc - t_delay, h_min/1000, h_discr/1000)
-                    else :
-                        fp.plot_hit2(f_y_keep, t_trj, m_type, i_type, 0, f_b, int_max_range/1000, op_range, det_range, t_lnc - t_delay, h_min/1000, h_discr/1000)
+                    fp.plot_hit2(f_y_keep, t_trj, m_type, i_type, 0, f_b, int_max_range/1000, op_range, det_range, t_lnc - t_delay, h_min/1000, h_discr/1000)
 
                 shift_beg = f_b
                 shift_end = shift_min 
@@ -1445,13 +1522,10 @@ def footprint_mode2(s_func, # s_func needs to be either short_search2 or sls_sea
                         if ((f_a - f_b) < (f_a - mrange) * t_acc) or ((f_a - f_b) < stop_par) : 
                             break
                     fp_back2 = f_a
-                    print("\rBack  edge of the second part of the footprint found, location = {:.0f} km relative to ILP.".format((f_a - mrange)/1000))
+                    print("\rBack  edge of the second part found, location = {:.0f} km relative to ILP.".format((f_a - mrange)/1000))
 
                     if plot_hit_charts and i_type :
-                        if f_a == dist_limit : 
-                            fp.plot_hit2(f_ok, t_trj, m_type, i_type, 0, f_a, int_max_range/1000, op_range, det_range, t_lnc - t_delay, h_min/1000, h_discr/1000)
-                        else :
-                            fp.plot_hit2(f_y_keep, t_trj, m_type, i_type, 0, f_b, int_max_range/1000, op_range, det_range, t_lnc - t_delay, h_min/1000, h_discr/1000)
+                        fp.plot_hit2(f_y_keep, t_trj, m_type, i_type, 0, f_b, int_max_range/1000, op_range, det_range, t_lnc - t_delay, h_min/1000, h_discr/1000)
 
         if fp_single :
             fp_part2 = np.zeros((0, 5))
@@ -1466,18 +1540,86 @@ def footprint_mode2(s_func, # s_func needs to be either short_search2 or sls_sea
             print("\rCalculating the second (back) part of the footprint", end='')
             if fp_calc_param == 3 :
                 fp_part2 = fp_part_calc_v3(fp_front2, fp_back2, concentric=concentric_flag)
+
+        # =================================================================
+        # TEMPORÄRER DEBUG-CODE FÜR DIE -400KM GRENZE
+        # =================================================================
+        print("\n" + "="*50)
+        print("[MDFCC DEBUG] Analysing boundary cuts before sorting (Concentric={}):".format(concentric_flag))
+        if len(fp_part1) > 0:
+            min_y_p1 = np.min(fp_part1[:, 4])
+            max_y_p1 = np.max(fp_part1[:, 4])
+            print(f" -> Part 1 Y-Limits (Downrange): {min_y_p1/1000:.1f} km to {max_y_p1/1000:.1f} km")
+            print(f" -> Part 1 Relative to ILP: {(min_y_p1 - mrange)/1000:.1f} km to {(max_y_p1 - mrange)/1000:.1f} km")
+            print(f" -> Part 1 Total Points collected: {len(fp_part1)}")
+            
+        if not fp_single and len(fp_part2) > 0:
+            min_y_p2 = np.min(fp_part2[:, 4])
+            max_y_p2 = np.max(fp_part2[:, 4])
+            print(f" -> Part 2 Y-Limits (Downrange): {min_y_p2/1000:.1f} km to {max_y_p2/1000:.1f} km")
+            print(f" -> Part 2 Relative to ILP: {(min_y_p2 - mrange)/1000:.1f} km to {(max_y_p2 - mrange)/1000:.1f} km")
+            print(f" -> Part 2 Total Points collected: {len(fp_part2)}")
+        
+        # Test, ob das statische Numba-Array voll gelaufen ist (3600 Punkte-Limit)
+        try:
+            d_beta = float(beta_step) if 'beta_step' in globals() or 'beta_step' in locals() else 0.025
+            d_eps = float(angle_eps) if 'angle_eps' in globals() or 'angle_eps' in locals() else 1e-7
+            test_array = _numba_mis_traj_loop(t_trj, d_beta, 0.0, d_eps, 0.0, 0.0, True)
+            print(f" -> Numba internal trajectory array size: {len(test_array)} / 3600")
+            if len(test_array) >= 3599:
+                print(" !!! ALERT: Numba Array is MAXED OUT at 3600 entries! This truncates ICBM trajectories and cuts the footprint!")
+        except Exception as e:
+            print(f" -> Could not check Numba array size: {e}")
+        print("="*50 + "\n")
+        # === ENDE DEBUG-CODE ===
+
+        # =================================================================
+        # POLAR-FUSIONIERUNG (Gewünschte Standard-Glättung)
+        # =================================================================
+        if len(fp_part1) > 0:
+            if not fp_single and len(fp_part2) > 0:
+                combined_fp = np.vstack((fp_part1, fp_part2))
+            else:
+                combined_fp = fp_part1
+
+            if concentric_flag:
+                cx = 0.0
+                cy = (np.max(combined_fp[:, 4]) + np.min(combined_fp[:, 4])) / 2.0
+                
+                angles = np.arctan2(combined_fp[:, 4] - cy, combined_fp[:, 3] - cx)
+                angles_deg = np.round(np.degrees(angles) * 2) / 2.0
+                unique_angles = np.unique(angles_deg)
+                
+                cleaned_fp = []
+                for ua in unique_angles:
+                    mask = (angles_deg == ua)
+                    candidates = combined_fp[mask]
+                    if len(candidates) > 0:
+                        radii = np.sqrt((candidates[:, 3] - cx)**2 + (candidates[:, 4] - cy)**2)
+                        cleaned_fp.append(candidates[np.argmax(radii)])
+                
+                fp_part1 = np.array(cleaned_fp)
+                final_angles = np.arctan2(fp_part1[:, 4] - cy, fp_part1[:, 3] - cx)
+                fp_part1 = fp_part1[final_angles.argsort()]
+                fp_part1 = np.vstack((fp_part1, fp_part1[0:1]))
+                fp_part2 = np.zeros((0, 5))
+            else:
+                fp_part1 = combined_fp
                           
         print("\rFootprint calculation complete (Concentric={})".format(concentric_flag))
+        
+        # WICHTIGER INTERFACE-FIX: Rückgabe als Liste zweier 2D-Arrays erzwingen
         return [fp_part1, fp_part2]
 
-
+    # =================================================================
+    # ÄUSSERER PIPELINE-START & RETURN FÜR DIE HAUPTFUNKTION
+    # =================================================================
     fp_part_std = run_footprint_pipeline(t_itable, concentric_flag=False)
 
     if is_compare_mode:
         fp_part_con = run_footprint_pipeline(t_itable_con, concentric_flag=True)
-    
         return [fp_part_std, fp_part_con]
     else:
-        return [fp_part_std, np.zeros((0, 5))]
+        return [fp_part_std, [np.zeros((0, 5)), np.zeros((0, 5))]]
 
 """ End of footprint_mode2 """

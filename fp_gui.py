@@ -4000,7 +4000,7 @@ def gui_probing_chart(fp_scatter_arr,
         pass
     finally :
         probing_chart_win = Toplevel(root)
-        probing_chart_win.title('Footprint by Porbing Chart')
+        probing_chart_win.title('Footprint by Probing Chart')
         probing_chart_win.geometry("+500+100")
         
         chwin_row0 = Frame(probing_chart_win, border=1)
@@ -4182,7 +4182,7 @@ def run_probing() :
     print("\nFootprint by probing started. Missile type m{}, Interceptor type i{}".format(mtype, itype))
     print("Missile type {} trajectory calculating...".format(mtype), end='')
 
-    if set_time_stamp_var.get() : # possibly delete? $$$ #TODO
+    if set_time_stamp_var.get() : 
         r_now = datetime.now()
         t_stamp = "-" + r_now.strftime("%y%m%d-%H%M")
     else :
@@ -4195,10 +4195,10 @@ def run_probing() :
         original = sys.stdout
         sys.stdout = open(file_name, 'w')
 
-    if h_discr < 1000 : # can be set in meters or km, convert to meters if set in km
+    if h_discr < 1000 : 
         h_discr *= 1000
 
-    if h_int_min < 500 : # can be set in meters or km, convert to meters if set in km
+    if h_int_min < 500 : 
         h_int_min *= 1000
 
     interceptor_data = rd.interceptor(itype, rd_fname)
@@ -4226,22 +4226,19 @@ def run_probing() :
         print("STOP: Missile range too long for footprint calculation. The limit is {} km".format(bm_range_limit/1000))
         return False
 
-    dist = mrange * dist_param  # irrelevant, dist is hardcoded in fp.footprint_calc_v2 function
+    dist = mrange * dist_param  
 
     burn_time = sum(missile_data["t_bu"]) + sum(missile_data["t_delay"])
-
-    t_int_lnc = burn_time + t_delay # earliest int launch counting from missile launch (launch detection time + etc.)
+    t_int_lnc = burn_time + t_delay 
 
     det_range = 0.0
     if "det_range" in interceptor_data.keys() :
         if len(interceptor_data["det_range"]) > mtype :
-            det_range = interceptor_data["det_range"][mtype] # detection range, this is set in the "rocket_data" module
+            det_range = interceptor_data["det_range"][mtype] 
         else :
             print("No detection range value for this missile. Detection range set to 0.")
-            print("For quick test run 'Multi-Footprint by Detection Range.")
     else :
         print("No detection range values set in the interceptor data. Detection range set to 0.")
-        print("For quick test run 'Multi-Footprint by Detection Range.")
 
     if det_range < 11000 :
         det_range *= 1000
@@ -4249,8 +4246,117 @@ def run_probing() :
     fp_st = time.time()
     fp_st1 = time.process_time()
 
-    int_table = m.load_int_table(itype, fcc_constants.psi_step, beta_step, rd_fname, t_stamp, set_keep_int_tables_var.get())                
+    # Laden der Standard-Tabelle
+    int_table = m.load_int_table(itype, fcc_constants.psi_step, beta_step, rd_fname, t_stamp, set_keep_int_tables_var.get(), concentric=False)                
 
+    if not mode2 :
+        search_func = ss.short_search
+        search_type = "Shoot_once"
+        save_label = "son"
+    
+        if emode_sls :
+            search_func = ss.sls_search
+            search_type = "Shoot_look_shoot"
+            save_label = "sls"
+
+        print("Type of interception: " + search_type)
+        fp_by_probing = ss.angle_dist_tab2(search_func, trj, int_table, h_int_min, maxia, t_int_lnc, op_range, det_range, t_delay, h_discr, sect_angle_beg, sect_angle_end, sect_angle_step, sect_dist_beg, sect_dist_num, plot_hit_charts, hit_chart_angle, mtype, itype)
+    else :
+        print("Probing mode2")
+        search_func = ss.short_search2
+        search_type = "Shoot_once"
+        save_label = "son"
+    
+        if emode_sls :
+            search_func = ss.sls_search2
+            search_type = "Shoot_look_shoot"
+            save_label = "sls"
+
+        print("Type of interception: " + search_type)
+        fp_by_probing = ss.probing2(search_func, trj, int_table, h_int_min, maxia, t_int_lnc, op_range, det_range, t_delay, h_discr, acc, sect_angle_beg, sect_angle_end, sect_angle_step, sect_dist_beg, sect_dist_num, plot_hit_charts, hit_chart_angle, mtype, itype)
+
+    fp_scatter = fp_by_probing 
+
+    # Symmetrische Spiegelung der X-Achse
+    for i in range(len(fp_scatter)) :
+        fp_scatter = np.append(fp_scatter, [[-fp_scatter[i, 0], fp_scatter[i, 1]]], axis=0)
+        
+    # --- KARTESISCHER SCHALEN-FILTER (Glättet die blaue Kurve) ---
+    if len(fp_scatter) > 0:
+        x_rounded = np.round(fp_scatter[:, 0] / 2.0) * 2.0
+        unique_x = np.unique(x_rounded)
+        upper_shell = []
+        lower_shell = []
+        for ux in unique_x:
+            mask = (x_rounded == ux)
+            candidates = fp_scatter[mask]
+            if len(candidates) > 0:
+                upper_shell.append(candidates[np.argmax(candidates[:, 1])])
+                lower_shell.append(candidates[np.argmin(candidates[:, 1])])
+        upper_shell = np.array(upper_shell)
+        lower_shell = np.array(lower_shell)
+        upper_shell = upper_shell[upper_shell[:, 0].argsort()]
+        lower_shell = lower_shell[lower_shell[:, 0].argsort()][::-1]
+        fp_scatter = np.vstack((upper_shell, lower_shell, upper_shell[0:1]))
+
+    fp_scatter_list = fp_scatter.tolist()
+    fp_tab = [] 
+    fp_tab_con = [] 
+    
+    if show_ftprint_probe_var.get() :
+        print("...footprint calculation started")
+        if mode2 :
+            num_dist = num_steps_mode2_var.get()
+            
+            if compare:
+                # Konzentrische Vergleichstabelle laden
+                int_table_con = m.load_int_table(itype, fcc_constants.psi_step, beta_step, rd_fname, t_stamp, set_keep_int_tables_var.get(), concentric=True)
+                fp_results = ss.footprint_mode2(search_func, trj, int_table, h_int_min, maxia, t_int_lnc, angle_step_mode2, op_range, det_range, t_delay, h_discr, acc, num_dist, plot_hit_charts, hit_chart_angle, mtype, itype, t_itable_con=int_table_con)
+                fp_tab = fp_results[0]
+                fp_tab_con = fp_results[1]
+            else:
+                fp_results = ss.footprint_mode2(search_func, trj, int_table, h_int_min, maxia, t_int_lnc, angle_step_mode2, op_range, det_range, t_delay, h_discr, acc, num_dist, plot_hit_charts, hit_chart_angle, mtype, itype)
+                fp_tab = fp_results[0]
+        else :
+            fp_tab = fp.footprint_calc_v2(search_func, trj, int_table, h_int_min, maxia, t_int_lnc, angle_step, op_range, det_range, t_delay, h_discr, acc, dist)
+
+    if det_range :    
+        chart_info_str = "MIA={} km, t_int_lnc={} s, det_range={} km, t_delay={} s, h_discr={} km"
+        if not mode2 :
+            chart_info_str += "\n{} angle {}-{} by {} degr, range from {:.0f} km, {} steps"
+            chart_info_str = chart_info_str.format(h_int_min/1000, t_int_lnc, det_range/1000, t_delay, h_discr/1000, search_type, sect_angle_beg, sect_angle_end, sect_angle_step, sect_dist_beg, sect_dist_num)
+            title_str = "Footprint by probe mode1: i_type={} op_range={:.0f} km m_type={} mrange={:.0f} km".format(itype, op_range/1000, mtype, mrange/1000) if op_range else "Footprint by probe mode1: i_type={} m_type={} mrange={:.0f} km".format(itype, mtype, mrange/1000)
+        else :
+            chart_info_str += "\n{}, angle_step {} degr, range by {} steps"
+            chart_info_str = chart_info_str.format(h_int_min/1000, t_int_lnc, det_range/1000, t_delay, h_discr/1000, search_type, angle_step_mode2, num_dist)
+            title_str = "Footprint Mode2: i_type={} op_range={:.0f} km m_type={} mrange={:.0f} km".format(itype, op_range/1000, mtype, mrange/1000) if op_range else "Footprint Mode2: i_type={} m_type={} mrange={:.0f} km".format(itype, mtype, mrange/1000)
+    else :    
+        chart_info_str = "MIA={} km, t_int_lnc={} s, sat_delay={} s, h_discr={} km"
+        if not mode2 :
+            chart_info_str += "\n{} angle {}-{} by {} degr, range from {:.0f} km, {} steps"
+            chart_info_str = chart_info_str.format(h_int_min/1000, t_int_lnc, fcc_constants.sat_delay, h_discr/1000, search_type, sect_angle_beg, sect_angle_end, sect_angle_step, sect_dist_beg, sect_dist_num)
+            title_str = "Footprint by probe mode1: i_type={} op_range={:.0f} km m_type={} mrange={:.0f} km".format(itype, op_range/1000, mtype, mrange/1000) if op_range else "Footprint by probe mode1: i_type={} m_type={} mrange={:.0f} km".format(itype, mtype, mrange/1000)
+        else :
+            chart_info_str += "\n{}, angle_step {} degr, range by {} steps"
+            chart_info_str = chart_info_str.format(h_int_min/1000, t_int_lnc, fcc_constants.sat_delay, h_discr/1000, search_type, angle_step_mode2, num_dist)
+            title_str = "Footprint Mode2: i_type={} op_range={:.0f} km m_type={} mrange={:.0f} km".format(itype, op_range/1000, mtype, mrange/1000) if op_range else "Footprint Mode2: i_type={} m_type={} mrange={:.0f} km".format(itype, mtype, mrange/1000)
+
+    chart_fname = footprint_path + "/fp_probe_m{}_i{}_{}{}.png".format(mtype, itype, save_label, t_stamp)
+    if set_keep_fp_chart_var.get() :
+        m.keep_old_file(chart_fname)
+        
+    lbl_scatter = "probe"
+    lbl_curve = "Angle-Elevation"
+    
+    if mode2 and compare:
+        curves_to_plot = [fp_tab, fp_tab_con]
+        labels_to_plot = ["Angle-Elevation", "Concentric"]
+        sector_chart = gui_probing_chart([fp_scatter], curves_to_plot, [lbl_scatter], labels_to_plot, chart_info_str, title_str, chart_fname)
+    else:
+        sector_chart = gui_probing_chart([fp_scatter], [fp_tab], [lbl_scatter], [lbl_curve], chart_info_str, title_str, chart_fname)
+    
+    fp_et = time.time()
+    fp_et1 = time.process_time()
     if not mode2 :
         search_func = ss.short_search
         search_type = "Shoot_once"
@@ -4540,7 +4646,7 @@ def gui_probing() : # routine's window shell, for actual routine see run_probing
 
             btn_save_config = Button(probing_win, text="Save Config", command=save_program_config)
             
-            btn_run_probing = Button(probing_win, text="Compute", command=lambda: call_longrun(lambda: run_probing(compare=fp_compare_var.get())))
+            btn_run_probing = Button(probing_win, text="Compute", command=lambda: call_longrun(lambda: run_probing()))
             
             lbl_sect_angle_beg.grid(row=0, column=0, sticky='w')
             ent_sect_angle_beg.grid(row=0, column=1)
@@ -4570,7 +4676,7 @@ def gui_probing() : # routine's window shell, for actual routine see run_probing
 
             btn_save_config = Button(probing_win, text="Save Config", command=save_program_config)
             
-            btn_run_probing = Button(probing_win, text="Compute", command=lambda: call_longrun(lambda: run_probing(compare=fp_compare_var.get())))
+            btn_run_probing = Button(probing_win, text="Compute", command=lambda: call_longrun(lambda: run_probing()))
 
             lbl_sect_angle_step.grid(row=0, column=0, sticky='w')
             ent_sect_angle_step.grid(row=0, column=1)

@@ -69,7 +69,8 @@ def _int_trj_worker(args):
 # =================================================================
 
 def interceptor_table(interc_data, ind_flight_dataprint=False, psi_step=0.25):
-    psi_n = int(90 / psi_step)
+    max_psi = 120.0
+    psi_n = int(max_psi / psi_step)
     
     worker_args = [(interc_data.copy(), psi_step, j) for j in range(psi_n)]
     int_table_0 = np.empty(psi_n, dtype=object)
