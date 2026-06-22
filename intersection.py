@@ -369,7 +369,11 @@ def draw_polygon(poly, title, lon, lat, azi, f_size, save_chart_fname='default',
     #print("f_size={:.2f}, f_size_equat={:8.2f}, lon={:.2f}, az_shift={:.2f}, azim={:.2f}".format(f_size, f_size_equat, lon, az_shift, azim))
     #print("azi   ={:.2f}, f_size_merid={:8.2f}, lat={:.2f}, el_shift={:.2f}, elev={:.2f}".format(azi, f_size_merid, lat, el_shift, elev))
     #zoom_factor = floor(5000 / f_size)
-    zoom_factor = round (4000 / f_size)
+    if f_size <= 1e-6:
+        zoom_factor = 10  
+    else:
+        zoom_factor = 4000 / f_size
+        
     if zoom_factor < 1 :
         zoom_factor = 1
     elif zoom_factor > 15 :

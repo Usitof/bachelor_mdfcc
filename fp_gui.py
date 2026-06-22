@@ -1302,6 +1302,7 @@ def gui_maxrange(r_data) :
 
 
 def gui_mk_poly_data(ftprint_arr, mis_range, data_fname, mode2=False) :
+
     """
     Draw footprint on the globe.
 
@@ -2259,7 +2260,7 @@ def gui_footprint() :
     save_label = "son"
 
     if emode_sls :
-        search_func = ss.sls_search
+        search_func = ss.sls_search2
         search_type = "Shoot_Look_Shoot"
         save_label = "sls"
         
@@ -2267,12 +2268,12 @@ def gui_footprint() :
 
     if not mode2 :
         # 1. angle-elevation
-        footprint_tab = fp.footprint_calc_v2(search_func, trj, int_table, h_int_min, maxia, t_int_lnc, angle_step, op_range, det_range, t_delay, h_discr, acc, dist, plot_hit_charts, hit_chart_angle, m_type, i_type)
+        footprint_tab = fp.footprint_calc_v2(search_func, trj, int_table, h_int_min, maxia, t_int_lnc, angle_step, op_range, det_range, t_delay, h_discr, acc, dist, plot_hit_charts, hit_chart_angle, m_type, i_type, concentric = False)
         
         # 2. concentric footprint
         if compare:
             print("Calculating Concentric Footprint for Comparison...")
-            footprint_tab_con = fp.footprint_calc_v2(search_func, trj, int_table_con, h_int_min, maxia, t_int_lnc, angle_step, op_range, det_range, t_delay, h_discr, acc, dist, plot_hit_charts, hit_chart_angle, m_type, i_type)
+            footprint_tab_con = fp.footprint_calc_v2(search_func, trj, int_table_con, h_int_min, maxia, t_int_lnc, angle_step, op_range, det_range, t_delay, h_discr, acc, dist, plot_hit_charts, hit_chart_angle, m_type, i_type, concentric = True)
     else :
         if emode_sls :
             search_func_m2 = ss.sls_search2
@@ -2302,7 +2303,10 @@ def gui_footprint() :
         else:
             fprint_tab_lst.append(np.zeros((0, 5)))
 
-        if footprint_tab_con is not None and len(footprint_tab_con) > 0:
+        if (footprint_tab_con is not None and 
+        not isinstance(footprint_tab_con, bool) and 
+        hasattr(footprint_tab_con, "__len__") and 
+        len(footprint_tab_con) > 0):
             fprint_tab_lst.append(footprint_tab_con)
         else:
             fprint_tab_lst.append(np.zeros((0, 5)))
@@ -2347,7 +2351,7 @@ def gui_footprint() :
                 title_str = "Footprint: i_type={} m_type={} mrange={:.0f} km".format(i_type, m_type, mrange/1000)
             
             chart_fname = footprint_path + "/footprint_m{}_i{}_{}{}.png".format(m_type, i_type, save_label, t_stamp)
-    
+
             plots_to_render = [footprint_tab, footprint_tab_con] if compare else [footprint_tab]
             gui_fpchart_n(plots_to_render, label_arr, chart_info_str, title_str, chart_fname, header_str, mrange, data_fname, False, bw)
 
@@ -2371,7 +2375,7 @@ def gui_footprint() :
                 title_str = "Footprint Mode2: i_type={} m_type={} mrange={:.0f} km".format(i_type, m_type, mrange/1000)
             
             chart_fname = footprint_path + "/footprint_mode2_m{}_i{}_{}{}.png".format(m_type, i_type, save_label, t_stamp)
-    
+
             plots_to_render = [footprint_tab2, footprint_tab2_con] if compare else [footprint_tab2]
             gui_fpchart_n(plots_to_render, label_arr, chart_info_str, title_str, chart_fname, header_str, mrange, data_fname, True, bw)
 
