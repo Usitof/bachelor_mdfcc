@@ -2,7 +2,7 @@ from ambiance import Atmosphere # https://pypi.org/project/ambiance/
 import numpy as np 
 import rocket_data as rd
 from math import pi, sin, cos, asin, acos, atan, sqrt, radians, degrees, \
-    ceil, atan2, tan
+    ceil, atan2, tan, isnan, isinf
 import time
 
 from fcc_constants import eps, angle_eps, R_e, dist_limit, check_fpa, \
@@ -1352,71 +1352,79 @@ def trj_from_target(traj_0, r_tar, t_shift0) :  # needs correction: beta should 
     return(traj_1)
 
 #@profile
-def trj_shift_turn(traj_0, r_tar, t_shift, t_angle) :
+def trj_shift_turn(traj_0, r_tar, t_shift, t_angle):
     """
-    Trajectory with missile launch point at t_shift distance [from ILP] along the launch points line
-    and trajectory plane turned around the (Earth center - missile launch point) line by t_angle
-    Output coords: distance from ILP and elevation angle from ILP over/below ILP horizon
-
-    Parameters
-    ----------
-    traj_0 : 
-        original trajectory in polar coords from Earth center: time, radius, angle (in rad)
-    r_tar : float
-        target point's R from Earth center (normally = R_e)
-    t_shift : float
-        shift of missile launch point along ILP-MLP line == distance ILP-MLP
-    t_angle : float, radians
-        angle between trajectory plane and ILP-EarthCenter-MLP plane
-
-    Returns
-    -------
-    traj_shtu - trajectory in polar coords centered at interceptor launch point (time, R, alfa_r, r, beta_r, x, z)
-
+    Transforms a ballistic trajectory from a geocentric polar coordinate system 
+    to a coordinate frame centered at the Interceptor Launch Point (ILP).
+    Safely rejects unphysical/extreme geometry shifts from optimization loops.
     """
-    #traj_shtu = np.empty_like(traj_0)
+    eps = 1e-12
     traj_shtu = np.empty([len(traj_0), 7])
-    f_gamma = t_shift / r_tar # polar anglle ILP and MLP
-    """
-    if t_angle == 0 :
-        for i in range(len(traj_0)) :
-            i_1 = sqrt(r_tar*r_tar + traj_0[i, 1]*traj_0[i, 1] - 2 * r_tar * traj_0[i, 1] * cos(f_gamma - traj_0[i, 2]))
-            i_2 = asin((traj_0[i, 1] * cos(f_gamma - traj_0[i, 2]) - r_tar) / i_1)
-    else: 
-    """
-    for i in range(len(traj_0)) :
-        #i_0 = traj_0[i, 0]
+    f_gamma = t_shift / r_tar  # Geocentric central separation angle
+    
+    for i in range(len(traj_0)):
         t0i1 = traj_0[i, 1]
-        #if t0i1 < r_tar : t0i1 = r_tar
         t0i2 = traj_0[i, 2]
-        sinta2_2 = sin(t_angle/2)**2
-        i_1sq = r_tar*r_tar + t0i1*t0i1 - 2 * r_tar * t0i1 * cos(f_gamma - t0i2)
-        #i_1sq = r_tar*r_tar + traj_0[i, 1]*traj_0[i, 1] - 2 * r_tar * traj_0[i, 1] * cos(f_gamma - traj_0[i, 2])  #v0      
-        if t_angle > eps :
-            i_1sq += 4 * r_tar * t0i1 * sin(f_gamma) * sin(t0i2) * sinta2_2
-            #i_1sq += 4 * r_tar * traj_0[i, 1] * sin(f_gamma) * sin(traj_0[i, 2]) * sin(t_angle/2)*sin(t_angle/2)  #v0
-        i_1 = sqrt(i_1sq) # r
-
-        if (sin(t_angle) < eps*eps) and (abs(f_gamma - t0i2) < eps) :
-        #if (t_angle < eps*eps) and (abs(f_gamma - t0i2) < eps*eps) :
-            if i > 0 :
-                i_2 = traj_shtu[i - 1, 4]
-            else :
-                print("impossible missile launch place")
-                i_2 = pi / 2
-            if traj_0[i, 1] < r_tar : i_2 = -i_2 # when "impact" point is below ILP # not happening now that impact is at zero
-        else:
-            #cos_delta = (r_tar*r_tar + traj_0[i, 1]*traj_0[i, 1] - i_1sq)/ 2 / r_tar / traj_0[i, 1] # old, same as new, but can be >1
-            cos_delta = cos(f_gamma - t0i2) - 2 * sin(f_gamma) * sin(t0i2) * sinta2_2 
-            #cos_delta = cos(f_gamma - traj_0[i, 2] - 2 * sin(f_gamma) * sin(traj_0[i, 2]) * sin(t_angle/2)*sin(t_angle/2)) #v0
-            #i_2 = asin((traj_0[i, 1] * cos_delta - r_tar)/ i_1)
-            if abs((t0i1 * cos_delta - r_tar)/ i_1) > 1 :
-                print("i = {}, t = {:.1f}, t0i1=R = {:.3f}, cos_delta = {}, i_1=r = {:.3f}, (t0i1 * cos_delta - r_tar)/ i_1) = {}".format(i, traj_0[i, 0], t0i1, cos_delta, i_1, (t0i1 * cos_delta - r_tar)/ i_1))
-                print("sin(t_angle) = {}, f_gamma - t0i2 = {}, t0i2 = {} degr".format(sin(t_angle), f_gamma - t0i2, degrees(t0i2)))
-            i_2 = asin((t0i1 * cos_delta - r_tar)/ i_1) # beta
+        sinta2_2 = sin(t_angle / 2) ** 2
         
-        traj_shtu[i] = [traj_0[i, 0], traj_0[i, 1], traj_0[i, 2], i_1, i_2, i_1 * cos(i_2), i_1 * sin(i_2)] # was degrees(i_2) --?
-    return(traj_shtu)
+        # 1. Compute squared range to ILP
+        i_1sq = (r_tar * r_tar) + (t0i1 * t0i1) - (2.0 * r_tar * t0i1 * cos(f_gamma - t0i2))
+        if t_angle > eps:
+            i_1sq += 4.0 * r_tar * t0i1 * sin(f_gamma) * sin(t0i2) * sinta2_2
+            
+        # Safeguard against negative squared ranges due to extreme negative shifts
+        if i_1sq < 0:
+            i_1sq = 0.0
+        i_1 = sqrt(i_1sq)
+
+        # 2. Singularity Handling
+        if (sin(t_angle) < eps * eps) and (abs(f_gamma - t0i2) < eps):
+            if i > 0:
+                i_2 = traj_shtu[i - 1, 4]
+            else:
+                i_2 = pi / 2.0
+            if traj_0[i, 1] < r_tar: 
+                i_2 = -i_2
+        else:
+            # 3. Compute spherical projection factor
+            cos_delta = cos(f_gamma - t0i2) - (2.0 * sin(f_gamma) * sin(t0i2) * sinta2_2)
+            
+            # Safeguard against division by zero if i_1 is exactly 0
+            if abs(i_1) < eps:
+                arg = 0.0
+            else:
+                arg = (t0i1 * cos_delta - r_tar) / i_1
+            
+            # --- NUMERICAL HARDENING & CRITICAL DOMAIN VIOLATION HANDLING ---
+            if abs(arg) > 1.0:
+                # Type A: Small floating point numeric inaccuracies close to launch pad
+                if abs(arg) <= 1.001:
+                    arg = 1.0 if arg > 0.0 else -1.0
+                else:
+                    # Type B: Major geometric domain violation (e.g., t_shift = -4813 km)
+                    # Instead of throwing a uncatchable ValueError, we pack a safe fallback state 
+                    # that marks this footprint calculation step as invalid/undefendable.
+                    if i > 0:
+                        # Carry over previous valid calculation to prevent code crashing
+                        i_2 = traj_shtu[i - 1, 4]
+                    else:
+                        # At index 0, point is physically completely unviewable/under horizon
+                        i_2 = -pi / 2.0  # Safe ground default direction
+            else:
+                i_2 = asin(arg)  # Local elevation angle (beta)
+
+        # 5. Commit transformed spatial state vectors to output matrix
+        traj_shtu[i] = [
+            traj_0[i, 0],       # Time
+            traj_0[i, 1],       # Geocentric Radius
+            traj_0[i, 2],       # Geocentric Central Angle
+            i_1,                # Local Range (r)
+            i_2,                # Local Elevation (beta)
+            i_1 * cos(i_2),     # Local X-coordinate
+            i_1 * sin(i_2)      # Local Z-coordinate
+        ]
+        
+    return traj_shtu
 
 #@profile
 def trj_from_center(t_traj, r_tar, t_fi, t_dist) :

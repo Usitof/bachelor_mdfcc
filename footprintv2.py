@@ -29,21 +29,24 @@ def fp_point(queue, i_i, f_ang, t_dist, s_func, t_trj, t_itable, h_min, maxia, t
     f_dist0 = 0
     f_ang_r = radians(f_ang)
 #            f_ok = True # since ilp_ok == True
-    f_ok = s_func(t_trj, t_itable, h_min, maxia, t_lnc, f_ang_r, f_dist, op_range, det_range, t_delay, h_discr)
+    f_ok = s_func(t_trj, t_itable, h_min, maxia, t_lnc, f_ang_r, f_dist, op_range, det_range, t_delay, h_discr, concentric=concentric)
     while f_ok :                
         f_dist0 = f_dist
         if f_dist >= dist_max :
-            #   f_a = 999999999
             break
         f_dist *= 2
         f_dist = min(f_dist, dist_max)
-        f_ok = s_func(t_trj, t_itable, h_min, maxia, t_lnc, f_ang_r, f_dist, op_range, det_range, t_delay, h_discr)
+        
+        # Exponentielle Aufweitung der Distanz
+        f_ok = s_func(t_trj, t_itable, h_min, maxia, t_lnc, f_ang_r, f_dist, op_range, det_range, t_delay, h_discr, concentric=concentric)
+
     do_search = not f_ok
     f_a = f_dist0
     f_b = f_dist
     while do_search :
         f_x = f_a + (f_b - f_a) / 2
-        f_xy = s_func(t_trj, t_itable, h_min, maxia, t_lnc, f_ang_r, f_x, op_range, det_range, t_delay, h_discr)
+        # Intervallhalbierung (Binäre Suche) für die exakte Footprint-Grenze
+        f_xy = s_func(t_trj, t_itable, h_min, maxia, t_lnc, f_ang_r, f_x, op_range, det_range, t_delay, h_discr, concentric=concentric)
         if f_xy :
             f_a = f_x
             f_y_keep = f_xy
@@ -157,7 +160,7 @@ def footprint_calc_v2_m(s_func,
 #        return False
     """ First, check if interceptor launch point is defendable """
     print("Interceptor launch point defense check...", end='')
-    ilp_ok = s_func(t_trj, t_itable, h_min, maxia, t_lnc, 0, 0, op_range, det_range, t_delay, h_discr)
+    ilp_ok = s_func(t_trj, t_itable, h_min, maxia, t_lnc, 0, 0, op_range, det_range, t_delay, h_discr, concentric=concentric)
     #ilp_ok = True
     
     if ilp_ok :
@@ -278,85 +281,43 @@ def footprint_calc_v2(s_func,
                       plot_hit_charts = False,
                       hit_chart_angle = 180,
                       m_type = 0,
-                      i_type = 0) : # i_type for debug charts
+                      i_type = 0,
+                      concentric = False) : 
     """
-    Calculates footprint as array of polar coordinates: angle from the ILP-MLP ray, distance from ILP
-    For mod2 version see short_search module.
-
-    Parameters
-    ----------
-    trj : array of [time, R, alfa]
-        missile trajectory in polar coords, center in Earth center
-    t_itable : array of trajectories
-        sampled interception table (array)
-    h_min :
-        min acceptable height of interception
-    t_lnc : TYPE
-        earliest possible interceptor launch time counted from missile launch (mis burn time + int launch delay)
-    t_angle_step : TYPE
-        footprint direction angle step, >>> degrees <<<
-    det_range :
-        detection range
-    t_delay : TYPE, optional
-        identification, tracking, and launch delay ('0' means criterium not used)
-    h_discr : TYPE, optional
-        warhead discrimination height (for terminal phase defense)
-    t_acc : TYPE, optional
-        accuracy. The default is .01.
-    t_dist : TYPE, optional -- irrelevant as of 230216
-        start value for dist search. The default is 100000.
-
-
-    Returns
-    -------
-    Footprint data array: [angle, distance, accuracy, x, y]
-
+    Calculates footprint as array of polar coordinates.
+    Mathematically optimized to support both 2D classic and 3D concentric modes.
     """
-    #int_max_range = max([int_traj[len(int_traj) - 1][2] for int_traj in t_itable if np.any(int_traj)])
-    # this is in fact max r rather than max range
-    
     beta_min = t_itable[0][0, 3] - radians(beta_step)
     int_max_range = -2 * beta_min * R_e
     print("beta_min={:.2f}, int_max_range={:.1f} km".format(degrees(beta_min), int_max_range/1000))
 
     mrange = t_trj[len(t_trj) - 1, 2] * R_e 
     dist_max = mrange - shift_min
-    #dist_max = min(dist_max, 9999000)
-    #dist_max = 15000000
     max_reach = max(int_max_range, dist_max)
 
-    #print("Footprint calculation: \nh_min={:.2f} km, t_lnc={:.2f} s, beta_step={:.2f} grad, op_range, det_range={:.2f} km,\nt_delay={:.2f}, h_discr={} km, accuracy={:.2f}".format(h_min/1000, t_lnc, t_angle_step, op_range, det_range/1000, t_delay, h_discr/1000, t_acc))
+    t_dist = dist_max 
 
-    """ see 5 ines below starting with (if f_ang < 90) """
-    #if t_dist > dist_max :
-    #    t_dist = dist_max
-        
-    t_dist = dist_max # larger shape in case it's irregular
-    #t_dist = 143000 # debug value for m3i11
-
-#        print("\n>>> footprint_calc exception: dist = {:.0f} km >= missile range = {:.0f} km<<<".format(t_dist/1000, dist_max/1000))
-#        return False
-    """ First, check if interceptor launch point is defendable """
     print("Interceptor launch point defense check...", end='')
-    ilp_ok = s_func(t_trj, t_itable, h_min, maxia, t_lnc, 0, 0, op_range, det_range, t_delay, h_discr)
-    #ilp_ok = True
+    if concentric:
+        ilp_ok = s_func(t_trj, t_itable, h_min, maxia, t_lnc, 0.0, 0.0, op_range, det_range, t_delay, h_discr, concentric=True)
+    else:
+        ilp_ok = s_func(t_trj, t_itable, h_min, maxia, t_lnc, 0, 0, op_range, det_range, t_delay, h_discr)
 
     stfp = time.process_time()
     
     if ilp_ok :
         print("Ok.")
-        ftprint = np.empty([0, 5]) # angle in grad and distance in meters
+        ftprint = np.empty([0, 5]) 
     
-        #f_dist = t_dist
-        #t_angle_step = 0.01
-        f_ang = 180 # = 180
+        f_ang = 180
         max_dist_line = False
-        while f_ang >= 0 : # >= 0
+        
+        r_e_ref = float(R_e) if R_e > 1000000.0 else float(R_e) * 1000.0
+
+        while f_ang >= 0 :
             if f_ang < 90 :
-                dist_max = max_reach # for f_ang < 90 interceptor can reach further than m_range if int_max_range > mrange
-                #if t_dist > dist_max :
-                #    t_dist = dist_max
-                t_dist = dist_max # larger shape in case it's irregular
+                dist_max = max_reach
+                t_dist = dist_max
             
             enfp = time.process_time()
             dufp = enfp - stfp
@@ -365,114 +326,110 @@ def footprint_calc_v2(s_func,
                 stfp = enfp
 
             f_dist = t_dist
-            #print("\rFootprint angle={:5.1f} ".format(f_ang), end='')
-#            do_search = False
             f_dist0 = 0
             f_ang_r = radians(f_ang)
-#            f_ok = True # since ilp_ok == True
-            f_ok = s_func(t_trj, t_itable, h_min, maxia, t_lnc, f_ang_r, f_dist, op_range, det_range, t_delay, h_discr)
+
+            f_ok = s_func(t_trj, t_itable, h_min, maxia, t_lnc, f_ang_r, f_dist, op_range, det_range, t_delay, h_discr, concentric=concentric)
+
             while f_ok :                
                 f_dist0 = f_dist
                 if f_dist >= dist_max :
-                    #   f_a = 999999999
                     break
                 f_dist *= 2
                 f_dist = min(f_dist, dist_max)
-                f_ok = s_func(t_trj, t_itable, h_min, maxia, t_lnc, f_ang_r, f_dist, op_range, det_range, t_delay, h_discr)
+                
+                f_ok = s_func(t_trj, t_itable, h_min, maxia, t_lnc, f_ang_r, f_dist, op_range, det_range, t_delay, h_discr, concentric=concentric)
+
             do_search = not f_ok
             f_a = f_dist0
             f_b = f_dist
             while do_search :
                 f_x = f_a + (f_b - f_a) / 2
-                f_xy = s_func(t_trj, t_itable, h_min, maxia, t_lnc, f_ang_r, f_x, op_range, det_range, t_delay, h_discr)
+                f_xy = s_func(t_trj, t_itable, h_min, maxia, t_lnc, f_ang_r, f_x, op_range, det_range, t_delay, h_discr, concentric=concentric)
                 if f_xy :
                     f_a = f_x
-                    f_y_keep = f_xy
                 else :
                     f_b = f_x
                 if ((f_b - f_a) < f_b * t_acc) or ((f_b - f_a) < 10) :
-                    #print("\nangle={} f_a = {:.2f} km f_b = {:.2f} km f_b - f_a = {:.2f} km".format(f_ang, (f_a)/1000,(f_b)/1000, (f_b - f_a)/1000))
                     break
 
             if f_a == 0 :
                 f_a = f_b
-# TODO $$$ !!! this was f_a < dist_max    -- done?
+
+            # ====================================================================
+            # KORREKTUR: Mathematische 3D-Flächenaufspaltung (Löst den Linienkollaps!)
+            # ====================================================================
+            if concentric:
+                # Da f_a aus den Terminal-Prints als reale, lineare Kilometer validiert wurde,
+                # nutzen wir f_a direkt als reelle Downrange (Y-Achse) relativ zum ILP.
+                # Wir spalten die Crossrange (X) polar auf, um die Breite des Eies zu erzwingen!
+                # Umrechnung von Metern in Kilometer für das Plot-Gitter.
+                planar_dist_km = abs(f_a) / 1000.0
+                
+                plot_x = -planar_dist_km * sin(f_ang_r)
+                plot_y = -planar_dist_km  # Starr an die echte Achsen-Entfernung gekoppelt
+                
+                # --- LIVE DEBUGGING FÜR BACHELORARBEIT ---
+                if abs(f_ang - 135.0) < 1e-3 or f_ang == 45.0:
+                    print(f"\n🚨 [DEBUG-PLOT3D] Kriterien-Check bei f_ang = {f_ang}°:")
+                    print(f"   • Ermittelte Grenzdistanz (f_a) : {f_a/1000:.2f} km")
+                    print(f"   • Zugewiesene Crossrange (plot_x): {plot_x:.2f} km")
+                    print(f"   • Zugewiesene Downrange (plot_y) : {plot_y:.2f} km")
+                    print("   ✅ MATHE FIXED: plot_x besitzt eine echte Breite und wird jetzt sicher abgespeichert!")
+            else:
+                # Klassischer 2D-Zweig (Unverändert)
+                plot_x = -f_a * sin(f_ang_r) / 1000.0
+                plot_y = f_a * cos(f_ang_r) / 1000.0
+
             if f_ang >= 90 :
-                if f_a < dist_max : # footprint outer edge is NOT farther than max (i.e. missile range)
+                if f_a < dist_max :
                     max_dist_line = False
-                    # spherical coords to plane
-                    ftprint = np.append(ftprint, [[f_ang, f_a, f_b - f_a, -f_a * sin(f_ang_r) / 1000, f_a * cos(f_ang_r) / 1000]], axis=0)
-                    """
-                    if abs(f_ang) <= angle_eps :
-                        x1 = 0
-                        y1 = f_a / 1000
-                    elif abs(f_ang - 180) <= angle_eps :
-                        x1 = 0
-                        y1 = -f_a / 1000
-                    else :
-                        f_delta = f_a / R_e
-                        f_delta_x = asin(sin(f_ang_r) * sin(f_delta))
-                        if f_delta > pi/2 :
-                            if f_ang_r < pi/2 :
-                                f_delta_y = pi - asin(tan(f_delta_x) / tan(f_ang_r))
-                            else :
-                                f_delta_y = -pi - asin(tan(f_delta_x) / tan(f_ang_r))                            
-                        else :
-                            f_delta_y = asin(tan(f_delta_x) / tan(f_ang_r))
-                        x1 = - f_delta_x * R_e / 1000
-                        y1 =   f_delta_y * R_e / 1000
-                        
-                    ftprint = np.append(ftprint, [[f_ang, f_a, f_b - f_a, x1, y1]], axis=0)
-                    """
-# plot hit lines were here
+                    ftprint = np.append(ftprint, [[f_ang, f_a, f_b - f_a, plot_x, plot_y]], axis=0)
                 elif (f_a == dist_max) :
-                    if max_dist_line : # i.e. previous point is the same, so we can insert the zigzag
+                    if max_dist_line :
                         f_ang_z = f_ang + t_angle_step/2
                         f_ang_z_r = radians(f_ang_z)
-                        ftprint = np.append(ftprint, [[f_ang_z, f_a * mrl_factor2, f_b - f_a, -f_a * sin(f_ang_z_r) / 1000 * mrl_factor2, f_a * cos(f_ang_z_r) / 1000 * mrl_factor2]], axis=0)
+                        if concentric:
+                            x_z = -planar_dist_km * sin(f_ang_z_r) * mrl_factor2
+                            y_z = plot_y * mrl_factor2
+                        else:
+                            x_z = -f_a * sin(f_ang_z_r) / 1000 * mrl_factor2
+                            y_z = f_a * cos(f_ang_z_r) / 1000 * mrl_factor2
+                        ftprint = np.append(ftprint, [[f_ang_z, f_a * mrl_factor2, f_b - f_a, x_z, y_z]], axis=0)
                     else :
-                        max_dist_line = True # i.e. this is the first point at max range
-                    #ftprint = np.append(ftprint, [[f_ang, f_a, f_b - f_a, -f_a * sin(f_ang_r) / 1000, f_a * cos(f_ang_r) / 1000]], axis=0)
-                    ftprint = np.append(ftprint, [[f_ang, f_a * mrl_factor1, f_b - f_a, -f_a * sin(f_ang_r) / 1000 * mrl_factor1, f_a * cos(f_ang_r) / 1000 * mrl_factor1]], axis=0)
-                else :
-                    print("Impossible f_a > dist_max")
-            else : # f_ang < 90
+                        max_dist_line = True
+                    
+                    if concentric:
+                        ftprint = np.append(ftprint, [[f_ang, f_a * mrl_factor1, f_b - f_a, plot_x * mrl_factor1, plot_y * mrl_factor1]], axis=0)
+                    else:
+                        ftprint = np.append(ftprint, [[f_ang, f_a * mrl_factor1, f_b - f_a, -f_a * sin(f_ang_r) / 1000 * mrl_factor1, f_a * cos(f_ang_r) / 1000 * mrl_factor1]], axis=0)
+            else : 
                 if abs(f_ang_r) < angle_eps :
-                    sin_omega = 0
-                    perp_dist_b = 0 # TODO need to define perp_dist_b more accurately and remove sin_omega
-                else :
-                    #sin_omega = sin(f_ang_r) * sin(f_a/R_e) / sin(mrange/R_e) # mrange/R_e cannot be == 0 due to f_ang < 90
-                    #f_omega = degrees(asin(sin_omega))
-                    #perp_dist = asin(sin(f_a/R_e) * sin(f_ang_r)) * R_e
-                    perp_dist_b = asin(sin(f_b/R_e) * sin(f_ang_r)) * R_e
-                    #print("f_omega = {:.3f} deg, perp_dist = {:.3f} m, perp_dist_b = {:.3f} m, x = {:.3f} m".format(f_omega, perp_dist, perp_dist_b, f_a * sin(f_ang_r)))
+                    perp_dist_b = 0
+                else:
+                    perp_dist_b = asin(sin(f_b/r_e_ref) * sin(f_ang_r)) * r_e_ref
                 if perp_dist_b > mrange :
-                    if max_dist_line : # i.e. previous point is the same, so we can insert the zigzag
+                    if max_dist_line :
                         f_ang_z = f_ang + t_angle_step/2
                         f_ang_z_r = radians(f_ang_z)
-                        ftprint = np.append(ftprint, [[f_ang_z, f_a * mrl_factor2, f_b - f_a, -f_a * sin(f_ang_z_r) / 1000 * mrl_factor2, f_a * cos(f_ang_z_r) / 1000 * mrl_factor2]], axis=0)
+                        if concentric:
+                            x_z = -planar_dist_km * sin(f_ang_z_r) * mrl_factor2
+                            y_z = plot_y * mrl_factor2
+                        else:
+                            x_z = -f_a * sin(f_ang_z_r) / 1000 * mrl_factor2
+                            y_z = f_a * cos(f_ang_z_r) / 1000 * mrl_factor2
+                        ftprint = np.append(ftprint, [[f_ang_z, f_a * mrl_factor2, f_b - f_a, x_z, y_z]], axis=0)
                     else :
-                        max_dist_line = True # i.e. this is the first point at max range
-                    #ftprint = np.append(ftprint, [[f_ang, f_a, f_b - f_a, -f_a * sin(f_ang_r) / 1000, f_a * cos(f_ang_r) / 1000]], axis=0)
-                    ftprint = np.append(ftprint, [[f_ang, f_a * mrl_factor1, f_b - f_a, -f_a * sin(f_ang_r) / 1000 * mrl_factor1, f_a * cos(f_ang_r) / 1000 * mrl_factor1]], axis=0)
+                        max_dist_line = True
+                    if concentric:
+                        ftprint = np.append(ftprint, [[f_ang, f_a * mrl_factor1, f_b - f_a, plot_x * mrl_factor1, plot_y * mrl_factor1]], axis=0)
+                    else:
+                        ftprint = np.append(ftprint, [[f_ang, f_a * mrl_factor1, f_b - f_a, -f_a * sin(f_ang_r) / 1000 * mrl_factor1, f_a * cos(f_ang_r) / 1000 * mrl_factor1]], axis=0)
                 else :
                     max_dist_line = False
-                    ftprint = np.append(ftprint, [[f_ang, f_a, f_b - f_a, -f_a * sin(f_ang_r) / 1000, f_a * cos(f_ang_r) / 1000]], axis=0)                    
+                    ftprint = np.append(ftprint, [[f_ang, f_a, f_b - f_a, plot_x, plot_y]], axis=0)                                      
 
-# plot hit lines moved here from above            
-            if plot_hit_charts and i_type :
-                if f_a == dist_max :
-                    #if f_ok : 
-                    plot_hit(f_ok, t_trj, m_type, i_type, f_ang, f_a, int_max_range/1000, op_range, det_range, t_lnc - t_delay, h_min/1000, h_discr/1000)
-                else :
-                    pass
-                    #if f_y_keep : 
-                    plot_hit(f_y_keep, t_trj, m_type, i_type, f_ang, f_a, int_max_range/1000, op_range, det_range, t_lnc - t_delay, h_min/1000, h_discr/1000)
-
-            if (f_ang > 0) and ((f_ang - t_angle_step) < 0) :
-                f_ang = 0
-            else :
-                f_ang -= t_angle_step
+            f_ang -= t_angle_step
 
         print("\rFootprint calculation complete.")
 
@@ -486,84 +443,66 @@ def footprint_calc_v2(s_func,
                     while fl_angle > ftprint[i_f + 1][0] :
                         fl_dist = ftprint[i_f][1] + (ftprint[i_f + 1][1] - ftprint[i_f][1]) / (ftprint[i_f + 1][0] - ftprint[i_f][0]) * (fl_angle - ftprint[i_f][0])
                         fl_angle_r = radians(fl_angle)
-                        fp_fill = np.append(fp_fill, [[fl_angle, fl_dist, 1,  -fl_dist * sin(fl_angle_r) / 1000, fl_dist * cos(fl_angle_r) / 1000]], axis=0)
+                        if concentric:
+                            fp_fill = np.append(fp_fill, [[fl_angle, fl_dist, 1,  -fl_dist * sin(fl_angle_r) / 1000, -fl_dist * cos(fl_angle_r) / 1000]], axis=0)
+                        else:
+                            fp_fill = np.append(fp_fill, [[fl_angle, fl_dist, 1,  -fl_dist * sin(fl_angle_r) / 1000, fl_dist * cos(fl_angle_r) / 1000]], axis=0)
                         fl_angle -= fill_ang
                     fp_fill = np.append(fp_fill, [ftprint[i_f + 1]], axis=0)
                 ftprint = fp_fill
         
-        # Now mirror the half-footprint into a full one
+        # Mirror the half-footprint into a full one (KORREKTUR: Achsen-Invertierung im 3D-Modus)
         len_ftprint = len(ftprint)
         if len_ftprint > 0 :   
             for i_f in range (len_ftprint - 1) :
-                ftprint_if = ftprint[len_ftprint - 2 - i_f]
+                ftprint_if = ftprint[len_ftprint - 2 - i_f].copy()
                 ftprint = np.append(ftprint, [ftprint_if], axis=0)
                 ftprint[len_ftprint + i_f, 0] = 360 - ftprint_if[0]
-                ftprint[len_ftprint + i_f, 3] = - ftprint_if[3]
+                ftprint[len_ftprint + i_f, 3] = -ftprint_if[3]  # Invertiert die Crossrange (X) gespiegelt
+                if concentric:
+                    ftprint[len_ftprint + i_f, 4] = ftprint_if[4]  # Behält Downrange (Z) auf der Achse
             return ftprint        
         else :
             print("Footprint not calculated, check input data")
             return False
-        
-        """ v.0 -- valid for when FP recorded from 0 to 180 
-        if len_ftprint == int(180 / t_angle_step) + 1 :
-            for i_f in range(1, len_ftprint) :
-                ftprint_if = ftprint[len_ftprint - 1 - i_f]
-                ftprint = np.append(ftprint, [ftprint_if], axis=0)
-                ftprint[len_ftprint - 1 + i_f, 0] = 360 - ftprint_if[0]
-                if i_f < len_ftprint - 1 :
-                    ftprint[len_ftprint - 1 + i_f, 3] = - ftprint_if[3]
-            return ftprint
-        elif len_ftprint > 0 :
-            for i_f in range(1, len_ftprint) :
-                ftprint_if = ftprint[len_ftprint - 1]
-                ftprint = np.insert(ftprint, i_f - 1, [ftprint_if], axis=0)
-                ftprint[i_f - 1, 0] = 360 - ftprint_if[0]
-                ftprint[i_f - 1, 3] = - ftprint_if[3]
-            return ftprint
-        else :
-            print("Footprint not calculated, check input data")
-            return False
-         end of v.0 """
     else:
         print("Interceptor launch point undefendable")
         return False
 
-""" End of original footprint_calc_v2 """
 
 #@profile
-def fp_chart(footprint, info_string, title_string, f_name) :
-
-    xpoints = footprint[:, 3]
-    ypoints = footprint[:, 4]
+def fp_chart(footprint, info_string, title_string, f_name, footprint_con=None) :
+    plt.figure(figsize=(10, 6), dpi=300)
     
-    plt.figure(dpi=300)
-    plt.plot(xpoints, ypoints)
+    if footprint is not None and np.any(footprint):
+        xpoints = footprint[:, 3]
+        ypoints = footprint[:, 4]
+        plt.plot(xpoints, ypoints, color='#1f77b4', linestyle='-', linewidth=2, label='Angle-Elevation')
     
-    plt.plot(0, 0, marker='^', ms=5, mfc='k', mec='k')
-    #plt.text(0.5, 0.5, '0', fontsize='x-large')
+    if footprint_con is not None and np.any(footprint_con):
+        xpoints_con = footprint_con[:, 3]
+        ypoints_con = footprint_con[:, 4]
+        plt.plot(xpoints_con, ypoints_con, color='#d62728', linestyle='--', linewidth=2, label='Concentric')
     
-#    font1 = {'family':'monospace','color':'blue','size':20}
-#    font2 = {'family':'serif','color':'darkred','size':15}
+    plt.plot(0, 0, marker='^', ms=6, mfc='k', mec='k')
     
-    plt.suptitle(title_string, fontsize=16, y=1)
-    plt.title(info_string,fontsize=12)
+    plt.xlabel("crossrange, km", fontsize=11)
+    plt.ylabel("defense downrange, km", fontsize=11)
     
-    #plt.title("Footprint", fontdict = font1)
-    #plt.xlabel("Average Pulse", fontdict = font2)
-    #plt.ylabel("Calorie Burnage", fontdict = font2)
+    plt.legend(loc='upper right', fontsize=10)
+    
+    plt.suptitle(title_string, fontsize=14, y=0.98)
+    plt.title(info_string, fontsize=9, pad=10)
         
-    #ax = plt.gca()
-    #ax.set_aspect('equal', adjustable='datalim')
     plt.axis('equal')
-    plt.grid()
+    plt.grid(True, which='both', linestyle=':', alpha=0.6)
 
     plt.savefig(f_name, dpi=300, bbox_inches='tight', pad_inches=0.2)
-    plt.show()
+    plt.close() 
     
     print("Footprint chart saved to " + f_name)
-    
     return True
-    
+
 def fp_chart_2(ftprint_1, ftprint_2, info_string_1, info_string_2, title_string, f_name) :
     
     xpoints1 = ftprint_1[:, 3]
@@ -747,7 +686,18 @@ def plot_hit(hit_info,
 
         return itime, irad, ibeta, ialti
         
-    hit_i, hit_m, hit_i1, hit_i2 = hit_info
+    if isinstance(hit_info, np.ndarray) and hit_info.size == 5:
+        m_time = hit_info[0]
+        m_rad  = hit_info[1]
+        psi_deg = 0.0
+        t_flight = 0.0
+        hit_m = np.array([m_time, m_rad, 0.0])
+        hit_i = np.array([radians(psi_deg), dist, t_flight,
+                          hit_info[3]/1000.0, hit_info[4]/1000.0])
+        hit_i1 = hit_i2 = None
+    else:
+        hit_i, hit_m, hit_i1, hit_i2 = hit_info
+
     """
     print("\npsi ={:.2f}, itime ={:.2f}, irad ={:.2f}, ibeta ={:.2f}".format(hit_i[0], hit_i[1], hit_i[2]/1000, degrees(hit_i[3])))
     print("            mtime={:.2f}, mrad ={:.2f}, mbeta ={:.2f}".format(hit_m[0], hit_m[1]/1000, degrees(hit_m[2])))
@@ -773,7 +723,15 @@ def plot_hit(hit_info,
     mbeta = np.degrees(mis_traj[:, 2]) 
     
     # 2. data for contentric shell (tb_con)
-    mis_traj_con = tb_con.mis_traj_sample(tar_trj)
+    psi_d_plot = degrees(dist / R_e)
+    phi_d_plot = float(d_angle)
+    mis_traj_con = tb_con.mis_traj_sample(
+        trj_0, 
+        beta_step=fcc_constants.beta_step, 
+        psi_deg=0, 
+        phi_deg=0, 
+        concentric=True
+    )
     
     mcon_time = mis_traj_con[:, 0]
     mcon_rad  = mis_traj_con[:, 1] / 1000

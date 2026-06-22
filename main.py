@@ -35,6 +35,7 @@ t_delay = 5      # delay of interceptor launch after an event: missile rise over
 """ as an array with det_range value for every missile listed there. Zero means not used """
 
 set_shoot_look_shoot = False # used by both footprint_calc2, n_footprint and angle_dist_tab2, does not affect other routines
+concentric = False
 
 """ Regular footprint calculation parameters """
 acc = 0.01       # i.e. ~1% -- or 1000 m (built-in)
@@ -305,8 +306,16 @@ def run_interception_table(i_type, rd_fname='', psi_step=0.25, beta_step=0.1,
         interc_data = run_interceptor_table(i_type, rd_fname, psi_step, keep_int_tables, concentric=concentric)
         interceptor_data, config_data, interc_table = interc_data
  
-    # new: tb or tb_con
-    int_table_v2_w = tb_module.interception_table(interceptor_data, interc_table, psi_step, beta_step)
+    # =================================================================
+    # INTERFACE-WEICHE FÜR ANGLE-OUTER ERWEITERT
+    # =================================================================
+    # Wir übergeben das concentric-Flag an die tables_v2b_a.py weiter, 
+    # um das Invertieren des Gitters (Outer = theta, Inner = h) zu steuern.
+    if concentric:
+        int_table_v2_w = tb_module.interception_table(interceptor_data, interc_table, psi_step, beta_step, concentric=True)
+    else:
+        int_table_v2_w = tb_module.interception_table(interceptor_data, interc_table, psi_step, beta_step)
+        
     config_data = [psi_step, beta_step, R_e, fcc_constants.no_atmosphere]
     interc_data_w = np.array([interceptor_data, config_data, int_table_v2_w], dtype=object)
 
@@ -318,48 +327,45 @@ def run_interception_table(i_type, rd_fname='', psi_step=0.25, beta_step=0.1,
         np.save(intab_w, interc_data_w, allow_pickle=True)
     print("The sampled interception table saved to " + file_nw)
     
-    """ Sampled set verification, just in case, not really necessary """
+    # =================================================================
+    # HARMONISIERTE VERIFIKATION (Vorgabe Punkt 2 & 3)
+    # =================================================================
     if int_table_samp_verify :
         print("Sampled set verification only >>>")
         v_count = 0
         for i in range(len(int_table_v2_w)) :
-            #print("\rProcessing beta = {:.2f}  ".format(degrees(int_table_v2_w[i][0, 3])), end='')
             for j in range(len(int_table_v2_w[i]) - 1) :
-                if int_table_v2_w[i][j, 1] >= int_table_v2_w[i][j + 1, 1] or int_table_v2_w[i][j, 2] >= int_table_v2_w[i][j + 1, 2] :
-                    v_count += 1
-                    # print("Sequence violation beta = {:.2f}, psi = {:.2f}".format(degrees(int_table_v2_w[i][0, 3]), int_table_v2_w[i][j, 0]))
+                if concentric:
+                    # ANGLE-OUTER-REGEL: Da das Gitter nach theta_j aufgeteilt ist,
+                    # müssen im inneren Strahl-Vektor sowohl die Höhe/Radius [j, 2] 
+                    # als auch die Zeit [j, 1] streng monoton ansteigen!
+                    if int_table_v2_w[i][j, 1] >= int_table_v2_w[i][j + 1, 1] or \
+                       int_table_v2_w[i][j, 2] >= int_table_v2_w[i][j + 1, 2]:
+                        v_count += 1
+                else:
+                    # KLASSISCHE REGEL: Sortiert nach Radius (Zeile j, 2 >= j+1, 2)
+                    if int_table_v2_w[i][j, 1] >= int_table_v2_w[i][j + 1, 1] or \
+                       int_table_v2_w[i][j, 2] >= int_table_v2_w[i][j + 1, 2] :
+                        v_count += 1
+                        
         if v_count :
             print("Sampled table verification complete, {} out of sequence elements found.".format(v_count))
-
         else :
-            print("Sampled table verification complete, all good.")
+            print("Sampled table verification complete, all good. Monotonicity rule holds.")
 
-        """
-        int_table_v2_list = [itv2_i.tolist() for itv2_i in int_table_v2_w]
-        json_array = json.dumps(int_table_v2_list, indent=4)
-        with open("int_table_samp_dump-230817.json", 'w') as rdf:
-                rdf.write(json_array)
-        """
-
+        # Sicherheits-Check für Winkel-Monotonie der Strahlen-Indizes
         i_v = 0
         while i_v < (len(int_table_v2_w) - 1) :
-            while  len(int_table_v2_w[i_v]) == 0 :
-                print("empty i_v = {}, int_table_v2_w[i_v] = {}".format(i_v, int_table_v2_w[i_v]))
+            while len(int_table_v2_w[i_v]) == 0 :
                 i_v += 1
             j_v = i_v + 1
             while len(int_table_v2_w[j_v]) == 0 : 
-                print("empty j_v = {}, int_table_v2_w[j_v] = {}".format(j_v, int_table_v2_w[j_v]))
                 j_v += 1
+            
+            # Index 3 ist in beiden Modellen der Gitter-Führungswinkel (Klassisch: beta, Concentric: theta)
             if int_table_v2_w[i_v][0, 3] >= int_table_v2_w[j_v][0, 3] :
-                print(i_v, int_table_v2_w[i_v][0, 3], j_v, int_table_v2_w[j_v][0, 3])
+                print(f"[WARNUNG] Gitter-Inversion bei Index {i_v}: {int_table_v2_w[i_v][0, 3]} >= {int_table_v2_w[j_v][0, 3]}")
             i_v = j_v
-        
-        """
-        beta_min_deg = degrees(int_table_v2_w[0][0, 3])
-        beta_n = ceil((90 - beta_min_deg) / beta_step) + 1
-        int_tab_len = len(int_table_v2_w)
-        print(beta_min_deg, beta_n, int_tab_len)
-        """
 
     return interc_data_w
 
@@ -471,7 +477,7 @@ def load_int_table(t_itype, psi_step=0.25, beta_step=0.1, f_name='', t_tstamp=''
 """ END of load_int_table"""
 
 
-def run_footprint(m_type, i_type, rd_fname, emode_sls=False, h_int_min=1000, angle_step=10, t_delay=5, h_discr=0, acc=0.01) :
+def run_footprint(m_type, i_type, rd_fname, emode_sls=False, h_int_min=1000, angle_step=10, t_delay=5, h_discr=0, acc=0.01, concentric = False) :
     """ Reads sampled interception table from file.                 """
     """ Some debug data can be printed by setting debug_print flags """
     """ in 'bm.trj_from_center' and 'ss.short_search'               """
@@ -536,20 +542,47 @@ def run_footprint(m_type, i_type, rd_fname, emode_sls=False, h_int_min=1000, ang
         if det_range < 11000 : # can be set in meters or km, convert to meters if set in km
             det_range *= 1000
 
-    int_table = tb.load_int_table(i_type, t_stamp)                
+    # Laden der korrekten Tabelle passend zum ausgewählten Modus
+    if concentric:
+        int_table = tb_con.load_int_table(f"int_table_samp_i{i_type}_con.npy", t_stamp)
+    else:
+        int_table = tb.load_int_table(i_type, t_stamp)                
 
-    search_func = ss.short_search
+    if concentric:
+        search_func = ss.short_search2 
+    else:
+        search_func = ss.short_search
+
     search_mode = "Shoot_Once"
     save_label = "son"
 
     if emode_sls :
-        search_func = ss.sls_search
+        if concentric:
+            search_func = ss.sls_search2
+        else:
+            search_func = ss.sls_search
         search_mode = "Shoot_Look_Shoot"
         save_label = "sls"
         
     print("Footprint search mode: " + search_mode)
     
-    footprint_tab = fp.footprint_calc_v2(search_func, trj, int_table, h_int_min, t_int_lnc, angle_step, det_range, t_delay, h_discr, acc, dist)
+    if concentric:
+        fp_result = fp.footprint_mode2(
+            search_func, trj, int_table,
+            h_int_min, maxia=0, t_lnc=t_int_lnc,
+            angle_step=angle_step,
+            op_range=0, det_range=det_range,
+            t_delay=t_delay, h_discr=h_discr,
+            t_acc=acc, num_dist=60,
+            t_itable_con=int_table          
+        )
+        footprint_tab = fp_result[0]
+    else:
+        footprint_tab = fp.footprint_calc_v2(
+            search_func, trj, int_table, h_int_min, t_int_lnc,
+            angle_step, det_range, t_delay, h_discr, acc, dist,
+            concentric=False
+        )
 
     if np.any(footprint_tab) :
         header_str = "angle, distance, acc_prm, x, y, m_type={} i_type={} h_int_min={} t_int_lnc={} angle_step={} det_range={} km t_delay={} h_discr={} {}"
@@ -563,19 +596,40 @@ def run_footprint(m_type, i_type, rd_fname, emode_sls=False, h_int_min=1000, ang
         fptab_list = footprint_tab.tolist()
         data2save = header_str, fptab_list
         save_data(data2save, file_name)
-        
-        #with open('footprint_m{}_i{}_{}{}.npy'.format(m_type, i_type, save_label, t_stamp), 'wb') as footprint_f:
-        #    np.save(footprint_f, footprint_tab)
-        #print("Footprint data saved to footprint_m{}_i{}_{}{}.npy".format(m_type, i_type, save_label, t_stamp))
 
         chart_info_str = "h_int_min={} t_int_lnc={} angle_step={} det_range={} km t_delay={} h_discr={} {}"
         chart_info_str = chart_info_str.format(h_int_min, t_int_lnc, angle_step, det_range/1000, t_delay, h_discr, search_mode)
-        title_str = "Footprint: i_type={} m_type={} mrange={:.0f} km".format(i_type, m_type, mrange/1000)
+        
+        mode_label = "Concentric" if concentric else "Angle-Elevation"
+        title_str = f"Footprint ({mode_label}): i_type={i_type} m_type={m_type} mrange={mrange/1000:.0f} km"
         chart_fname = "footprint_m{}_i{}_{}{}.png".format(m_type, i_type, save_label, t_stamp)
+        
         if set_keep_fp_chart :
             keep_old_file(chart_fname)
+
+        if concentric and np.any(footprint_tab):
+            plot_tab_con = footprint_tab.copy()
+            r_e_ref = float(R_e) if R_e > 1000000.0 else float(R_e) * 1000.0
+            
+            for row in plot_tab_con:
+                if abs(row[0]) <= 2 * np.pi:
+                    row[0] = np.degrees(row[0])
+                
+                if row[1] < 2.0 * np.pi:
+                    row[1] = (row[1] * r_e_ref) / 1000.0
+                elif row[1] > 50000.0:
+                    row[1] = row[1] / 1000.0
+                    
+                if abs(row[3]) > 50000.0:
+                    row[3] /= 1000.0
+                if abs(row[4]) > 50000.0:
+                    row[4] /= 1000.0
+            
+            footprint_tab_to_plot = plot_tab_con
+        else:
+            footprint_tab_to_plot = footprint_tab
+
         fp.fp_chart(footprint_tab, chart_info_str, title_str, chart_fname)
-        #print("Footprint chart saved to " + chart_fname)
 
     fp_et = time.time()
     fp_elapsed_time = fp_et - fp_st
@@ -644,7 +698,7 @@ def run_n_footprint(m_type, i_type, det_range_list, rd_fname='', emode_sls=False
     
         print("Detection range = {} km ".format(det_range/1000))
         
-        footprint_tab = fp.footprint_calc_v2(search_func, trj, int_table, h_int_min, t_int_lnc, angle_step, det_range, t_delay, h_discr, acc, dist)
+        footprint_tab = fp.footprint_calc_v2(search_func, trj, int_table, h_int_min, t_int_lnc, angle_step, det_range, t_delay, h_discr, acc, dist, concentric)
         if np.any(footprint_tab) :
             fprint_tab_lst.append(footprint_tab)
         else:
@@ -881,7 +935,7 @@ def run_double_footprint() :
     save_label2 = "sls"
         
     print("Footprint1 search mode: " + search_mode1)
-    footprint_tab1 = fp.footprint_calc_v2(search_func1, trj, int_table, h_int_min, t_int_lnc, angle_step, det_range, t_delay, h_discr, acc, dist)
+    footprint_tab1 = fp.footprint_calc_v2(search_func1, trj, int_table, h_int_min, t_int_lnc, angle_step, det_range, t_delay, h_discr, acc, dist, concentric)
 
     if np.any(footprint_tab1) :
         fp_1 = True
@@ -907,7 +961,7 @@ def run_double_footprint() :
         print("No Footprint for Shoot_Once engagement...")
 
     print("Footprint2 search mode: " + search_mode2)
-    footprint_tab2 = fp.footprint_calc_v2(search_func2, trj, int_table, h_int_min, t_int_lnc, angle_step, det_range, t_delay, h_discr, acc, dist)
+    footprint_tab2 = fp.footprint_calc_v2(search_func2, trj, int_table, h_int_min, t_int_lnc, angle_step, det_range, t_delay, h_discr, acc, dist, concentric)
 
     if np.any(footprint_tab2) :
         fp_2 = True
@@ -971,13 +1025,13 @@ def main_calc() :
         run_balmis_range_vs_gth_list()
     
     if exe_interceptor_table :
-        run_interceptor_table()
+        run_interceptor_table(concentric)
     
     if exe_interception_table :
         run_interception_table(itype)        
     
     if exe_footprint :
-        run_footprint(mtype, itype)
+        run_footprint(mtype, itype, concentric)
     
     if exe_n_footprint :
         run_n_footprint(mtype, itype, det_range_list)
