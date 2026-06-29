@@ -1489,8 +1489,7 @@ def gui_mk_poly_data(ftprint_arr, mis_range, data_fname, mode2=False) :
             
             featurelist = []
 
-            for fp_pair in ftprint_arr :
-                #print(fp_pair)
+            for i_pair, fp_pair in enumerate(ftprint_arr) :
                 if (len(fp_pair) > 0) and (len(fp_pair[0]) > 0) :
                     if type(fp_pair[0][0]) != np.ndarray : #i.e. mode1
                         fp_pair = [fp_pair, []]
@@ -1506,32 +1505,45 @@ def gui_mk_poly_data(ftprint_arr, mis_range, data_fname, mode2=False) :
                                 ilat = loclat[i0]
                                 iazm = locazm[i0]
                                 polylist = []
-                                if not md2 : # Mod1 Footprint data array: [angle, distance, accuracy, x, y]
+                                if not md2 : # Mod1
                                     fplen = len(footprint)
                                     for i1 in range(fplen) :
                                         az_i = iazm + footprint[i1][0]
                                         s_i  = footprint[i1][1]
                                         p_i = geo_sphere.Direct(ilat, ilon, az_i, s_i)
                                         polylist.append([p_i['lon2'], p_i['lat2']])
-                                else :  	# Mod2 Footprint data array: [[angle, shift, acc, x, y], [angle, shift, acc, x, y]] (for two-part)
+                                else :  	# Mod2 Footprint data array
                                     fplen = len(footprint)
-                                    shift = footprint[0][1]
-                                    mrange = shift - footprint[0][4] * 1000
-                                    for i2 in range(fplen) :
-                                        shift = footprint[i2][1]
-                                        p_i0 = geo_sphere.Direct(ilat, ilon, iazm, shift)
-                                        az_i = p_i0['azi2'] - 180 + degrees(footprint[i2][0])
-                                        if footprint[i2][2] == 2 :
-                                            p_i = geo_sphere.Direct(p_i0['lat2'], p_i0['lon2'], az_i, mrange * mrl_factor2)
-                                        elif footprint[i2][2] == 3 :
-                                            p_i = geo_sphere.Direct(p_i0['lat2'], p_i0['lon2'], az_i, mrange * mrl_factor1)
-                                        else :
-                                            p_i = geo_sphere.Direct(p_i0['lat2'], p_i0['lon2'], az_i, mrange)
-                                        """ via x, y 
-                                        p__i = geo_sphere.Direct(ilat, ilon, iazm, footprint[i2][4] * 1000)
-                                        p_i  = geo_sphere.Direct(p__i['lat2'], p__i['lon2'], 90 + p__i['azi2'], footprint[i2][3] * 1000)
-                                        """
-                                        polylist.append([p_i['lon2'], p_i['lat2']])
+                                    
+                                    # The main list 'ftprint_arr' is passed from 'plots_to_render' 
+                                    # structured as: [footprint_tab2, footprint_tab2_con].
+                                    # ftprint_arr[i_arr][0][:, 3/4] -> non-concentric coordinates
+                                    # ftprint_arr[i_arr][1][:, 3/4] -> concentric coordinates
+
+                                    is_concentric_trajectory = (i_pair == 1)
+                                        
+                                    if is_concentric_trajectory:
+                                        # concentric: direct orthogonal x/y projection
+                                        for i2 in range(fplen):
+                                            p__i = geo_sphere.Direct(ilat, ilon, iazm, footprint[i2][4] * 1000.0)
+                                            p_i  = geo_sphere.Direct(p__i['lat2'], p__i['lon2'], 90.0 + p__i['azi2'], footprint[i2][3] * 1000.0)
+                                            polylist.append([p_i['lon2'], p_i['lat2']])
+                                    else:
+                                        # non-concentric: polar transformation needed
+                                        shift = footprint[0][1]
+                                        mrange = shift - footprint[0][4] * 1000.0
+                                        for i2 in range(fplen) :
+                                            shift = footprint[i2][1]
+                                            p_i0 = geo_sphere.Direct(ilat, ilon, iazm, shift)
+                                            az_i = p_i0['azi2'] - 180.0 + degrees(footprint[i2][0])
+                                            if footprint[i2][2] == 2 :
+                                                p_i = geo_sphere.Direct(p_i0['lat2'], p_i0['lon2'], az_i, mrange * mrl_factor2)
+                                            elif footprint[i2][2] == 3 :
+                                                p_i = geo_sphere.Direct(p_i0['lat2'], p_i0['lon2'], az_i, mrange * mrl_factor1)
+                                            else :
+                                                p_i = geo_sphere.Direct(p_i0['lat2'], p_i0['lon2'], az_i, mrange)
+                                            polylist.append([p_i['lon2'], p_i['lat2']])
+
                                 
                                 fp_polygon = geojson.Polygon([polylist])
                                 poly_f = geojson.Feature(geometry = fp_polygon, properties = {'fill': 'blue', 'fill-opacity': 0.3})
@@ -2052,8 +2064,9 @@ def gui_fpchart_n(ftprint_arr,
             ax.grid()
         """ End of internal functions """
         
+        
         fp_draw()
-            
+
         ent_chart_fname = CEntry(chwin_row1, bg='white', width=50)
         ent_chart_fname.insert(0, new_chart_fname)
         btn_chart_save = Button(chwin_row1, text="Save Chart", command=fp_save)
