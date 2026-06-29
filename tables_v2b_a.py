@@ -142,9 +142,7 @@ def interception_table(interceptor_data, int_table_v1,
 
     Output columns per ray:  [psi_deg, time, rv_m, theta_j_rad]
     """
-    # =========================================================================
-    # MULTI-PACK UNWRAPPING GATEWAY (Sichert Form (122,) statt (3,))
-    # =========================================================================
+
     if int_table_v1 is not None and hasattr(int_table_v1, "__len__") and len(int_table_v1) == 3:
         if isinstance(int_table_v1, (list, np.ndarray)) and not isinstance(int_table_v1, dict):
             int_table_v1 = int_table_v1[2]
@@ -178,7 +176,7 @@ def interception_table(interceptor_data, int_table_v1,
     for i_psi, traj in enumerate(valid):
         alfa  = traj[:, 3]   # monotone increasing geocentric angle [rad]
         n_pts = len(alfa)
-        psi_deg_val = traj[0, 0]
+        psi_val = traj[0, 0]
 
         for i_t in range(n_pts - 1):
             a1, a2 = alfa[i_t], alfa[i_t + 1]
@@ -202,7 +200,7 @@ def interception_table(interceptor_data, int_table_v1,
                 factor = max(0.0, min(1.0, factor))
                 i_rv   = rv1 + factor * (rv2 - rv1)
                 i_time = tm1 + factor * (tm2 - tm1)
-                ray_hits[k].append([psi_deg_val, i_time, i_rv, theta_j])
+                ray_hits[k].append([psi_val, i_time, i_rv, theta_j])
 
     print(f"\n[Angle-Outer] Hits collected. Building monotone envelope per ray...")
 
