@@ -92,29 +92,30 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
     if not sls_second:
         if det_range > 0:
             if concentric:
-                psi_rad = dist_opt / R_e # [rad] computed once above
-                phi_rad = fi_opt       # already radians
+                psi_rad = dist_opt / R_e 
+                phi_rad = fi_opt       
                 
-                while i_dr < max_idx:
-                    m_rad  = tar_traj[i_dr, 1]
-                    m_beta = tar_traj[i_dr, 2] # alfa_r aus balmis
+                valid_detection_found = False
+                
+                for idx in range(max_idx):
+                    m_rad  = tar_traj[idx, 1]
+                    m_beta = tar_traj[idx, 2] 
                     
                     cos_theta = cos(psi_rad) * cos(m_beta) + sin(psi_rad) * sin(m_beta) * cos(phi_rad)
                     cos_theta = max(-1.0, min(1.0, cos_theta))
                     theta_3d  = acos(cos_theta)
 
-                    slant_range = sqrt(fcc_constants.R_e**2 + m_rad**2 - 2 * fcc_constants.R_e * m_rad * cos(theta_3d))
+                    slant_range = sqrt(R_e**2 + m_rad**2 - 2 * R_e * m_rad * cos(theta_3d))
                     
                     if slant_range <= det_range:
+                        i_dr = idx
+                        valid_detection_found = True
                         break
-                    i_dr += 1
-                    
-                    if i_dr == max_idx:
-                        if debug_print:
-                            print("short search exception: missile always beyond detection range")
-                        t_int_lnc = t_bout
-                        break
+                
+                if not valid_detection_found:
+                    i_dr = max_idx - 1
             else:
+
                 while i_dr < max_idx and tar_traj[i_dr, 3] > det_range:
                     i_dr += 1
                     if i_dr == max_idx:
@@ -213,60 +214,6 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
     if concentric:
         mis_traj = tb_con.mis_traj_sample(trj, beta_step=fcc_constants.beta_step, psi_deg=psi_d, phi_deg=phi_d, concentric=True) 
                 
-        if False:
-            print("\n" + "="*60)
-            print("🔴 MDFCC DEEP INSPECTION: TRAJEKTORIE & LIMITS")
-            print("="*60)
-            print(f"  • Modus: {'CONCENTRIC 3D' if concentric else 'KLASSISCH 2D'}")
-            print(f"  • Form von tar_traj: {tar_traj.shape}")
-            print(f"  • Schleifen-Parameter -> omega (fi_opt): {fi_opt:.4f} rad ({degrees(fi_opt):.2f}°)")
-            print(f"  • Schleifen-Parameter -> shift (dist_opt): {dist_opt/1000:.2f} km")
-            
-            # 1. Rohdaten-Analyse (tar_traj)
-            print("\n  [1] TRAJEKTORIEN-ROHDATEN (tar_traj):")
-            headers = ["Time (0)", "R_or_h (1)", "alfa_r (2)", "r_or_Radius (3)", "beta_r_or_Elev (4)", "X (5)", "Z (6)"]
-            num_available_cols = tar_traj.shape[1]
-            for idx in range(num_available_cols):
-                h = headers[idx] if idx < len(headers) else f"Unbekannt ({idx})"
-                print(f"      Spalte {idx} [{h:20}]: Min = {tar_traj[:, idx].min():.3f}, Max = {tar_traj[:, idx].max():.3f}")
-            
-            print(f"\n      -> Startpunkt (Zeile 0)   : Time={tar_traj[0,0]:.1f}s | R={tar_traj[0,1]/1000:.1f}km | alfa={tar_traj[0,2]:.4f} rad")
-            if len(tar_traj) > 100:
-                print(f"      -> Mittelpunkt (Zeile 100): Time={tar_traj[100,0]:.1f}s | R={tar_traj[100,1]/1000:.1f}km | alfa={tar_traj[100,2]:.4f} rad")
-            print(f"      -> Endpunkt (Letzte Zeile): Time={tar_traj[-1,0]:.1f}s | R={tar_traj[-1,1]/1000:.1f}km | alfa={tar_traj[-1,2]:.4f} rad")
-
-            # 2. Resampling-Analyse (mis_traj) - nur wenn bereits erzeugt
-            print("\n  [2] GEOMETRISCHES RESAMPLING (mis_traj):")
-            if 'mis_traj' in locals() and mis_traj is not None and len(mis_traj) > 0:
-                print(f"      • Form von mis_traj: {mis_traj.shape}")
-                print(f"      • Spalte 0 [Time]       : Min = {mis_traj[:, 0].min():.2f}s, Max = {mis_traj[:, 0].max():.2f}s")
-                print(f"      • Spalte 1 [Radius/R]   : Min = {mis_traj[:, 1].min()/1000:.2f}km, Max = {mis_traj[:, 1].max()/1000:.2f}km")
-                print(f"      • Spalte 2 [Beta/Winkel]: Min = {degrees(mis_traj[:, 2].min()):.2f}°, Max = {degrees(mis_traj[:, 2].max()):.2f}°")
-                print(f"      • Spalte 3 [X-Crossrange]: Min = {mis_traj[:, 3].min():.2f} km/m, Max = {mis_traj[:, 3].max():.2f} km/m")
-                print(f"      • Spalte 4 [Z-Downrange] : Min = {mis_traj[:, 4].min():.2f} km/m, Max = {mis_traj[:, 4].max():.2f} km/m")
-                
-                # Lokale Extraktion der aktuellen Schleifenindizes simulieren/anzeigen
-                if 'i_m_beta' in locals():
-                    print(f"\n  [3] AKTUELLER TREFFER-KANDIDAT (Index {i_m_beta}):")
-                    print(f"      • Raketen-Zeit (m_time) : {mis_traj[i_m_beta, 0]:.2f} s")
-                    print(f"      • Raketen-Radius (m_rad): {mis_traj[i_m_beta, 1]/1000:.2f} km")
-                    print(f"      • Aktuelle Koordinaten  : X = {mis_traj[i_m_beta, 3]:.2f}, Z = {mis_traj[i_m_beta, 4]:.2f}")
-            else:
-                print("      • Hinweis: mis_traj wurde an dieser Stelle im Code noch nicht erzeugt.")
-
-            # 3. Physikalische Randbedingungen und Suchfenster
-            print("\n  [4] INPUT-LIMITS & FILTER-CRITERIA:")
-            print(f"      • t_int_lnc (Frühester Startzeitpunkt Interceptor): {t_int_lnc:.2f} s")
-            print(f"      • h_int_min (Minimale Abfanghöhe MIA)            : {h_int_min/1000:.2f} km")
-            print(f"      • maxia     (Maximale Abfanghöhe)                 : {maxia/1000:.2f} km" if maxia else "      • maxia     : Nicht limitiert")
-            print(f"      • op_range  (Operationale Reichweite Interceptor) : {op_range/1000:.2f} km" if op_range else "      • op_range  : Nicht limitiert")
-            print(f"      • det_range (Maximale Radardetektionsreichweite)  : {det_range/1000:.2f} km" if det_range else "      • det_range : Nicht limitiert")
-            print(f"      • t_delay   (Reaktionszeit nach Horizont)        : {t_delay:.1f} s")
-            print(f"      • othi_r    (Radar-Horizontwinkel)                : {degrees(othi_r):.2f}°" if 'othi_r' in locals() else f"      • Horizont-Winkel (oth_intercept): {oth_intercept}°")
-            print(f"      • Erdradius (R_e Bezugsbasis)                    : {fcc_constants.R_e/1000:.1f} km")
-            print("="*60 + "\n")
-
-        # =================================================================
     else:
         mis_traj = tb.mis_traj_sample(tar_traj)
 
@@ -1197,14 +1144,7 @@ def footprint_mode2(s_func, # s_func muss entweder short_search2 oder sls_search
         shift_beg = fp_front
         shift_end = fp_back
         
-        # Mathematisch exakte Schrittweitenberechnung auf der gekrümmten Erdsphäre
-        if concentric:
-            alpha_beg = shift_beg
-            alpha_end = shift_end
-            alpha_step = (alpha_end - alpha_beg) / num_steps
-            shift_step = alpha_step
-        else:
-            shift_step = (shift_end - shift_beg) / num_steps
+        shift_step = (shift_end - shift_beg) / num_steps
 
         f_shift = shift_beg
 
@@ -1230,13 +1170,13 @@ def footprint_mode2(s_func, # s_func muss entweder short_search2 oder sls_search
 
             f_ok = s_func(t_trj, active_table, h_min, maxia, t_lnc, f_x, p_dist_input, op_range, det_range, t_delay, h_discr, concentric=concentric)
             
-            if concentric:
+            """if concentric:
                 print(f"[FP-DEBUG] shift={(f_shift/1000 if concentric else f_shift/1000):.1f} km, "
                     f"omega={degrees(f_x):.1f}° -> f_ok is {type(f_ok)}")
                 if isinstance(f_ok, np.ndarray):
                     print(f"hit coords: X={f_ok[3]:.2f} km, Z={f_ok[4]:.2f} km")
                 else:
-                    print("no hit")
+                    print("no hit")"""
 
             if concentric and is_first_step and not is_hit(f_ok):
                 f_ok = s_func(t_trj, active_table, h_min, maxia, t_lnc, t_ang_beg, p_dist_input, op_range, det_range, t_delay, h_discr, concentric=concentric)
@@ -1616,7 +1556,8 @@ def footprint_mode2(s_func, # s_func muss entweder short_search2 oder sls_search
 
             f_b = f_shift0
             f_a = f_shift
-                
+        
+        f_y_keep = f_ok
         while True :
             f_x = f_a + (f_b - f_a) / 2
             f_xy = s_func(t_trj, current_table, h_min, maxia, t_lnc, 0, f_x, op_range, det_range, t_delay, h_discr, concentric=concentric_flag)
@@ -1648,19 +1589,48 @@ def footprint_mode2(s_func, # s_func muss entweder short_search2 oder sls_search
         shift_end = shift_min 
         dist_step = (shift_end - shift_beg) / num_dist 
         
+        # =========================================================================
+        # NEW PIPELINE DEBUG: Initial Loop State Parameters
+        # =========================================================================
+        print("\n[NEW-DEBUG-BACKSCAN] Initialization Parameters:")
+        print(f"  -> shift_beg (Front edge)  = {shift_beg/1000:.2f} km (rel to ILP: {(shift_beg - mrange)/1000:.2f} km)")
+        print(f"  -> shift_end (Max search)  = {shift_end/1000:.2f} km (rel to ILP: {(shift_end - mrange)/1000:.2f} km)")
+        print(f"  -> dist_step (Signed delta)= {dist_step/1000:.4f} km")
+        print(f"  -> num_dist (Grid resolution) = {num_dist}")
+        print(f"  -> concentric_flag = {concentric_flag}")
+        
         stm2 = time.process_time()
         f_shift = shift_beg 
+        loop_counter = 0
+
         while f_shift >= shift_end - .1 :
+            loop_counter += 1
             enm2 = time.process_time()
             dum2 = enm2 - stm2
             if dum2 >= out_time_freq :
                 print("\rProcessing distance {:6.0f} km...   ".format((f_shift - mrange)/1000), end='')
                 stm2 = enm2
 
+            # Run search function with mode flag passed down
             f_ok = s_func(t_trj, current_table, h_min, maxia, t_lnc, 0, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric_flag)
-            if not is_hit(f_ok) :
+            
+            # =========================================================================
+            # NEW PIPELINE DEBUG: Step Evaluation Inside Loop
+            # =========================================================================
+            f_ok_is_hit = is_hit(f_ok)
+            print(f"  [Loop #{loop_counter}] Testing f_shift = {f_shift/1000:.2f} km (rel: {(f_shift - mrange)/1000:.2f} km) -> Hit status: {f_ok_is_hit}")
+            
+            if not f_ok_is_hit :
                 f_b = f_shift
                 f_a = f_shift - dist_step
+                # =========================================================================
+                # NEW PIPELINE DEBUG: Loop Break Conditions Triggers
+                # =========================================================================
+                print(f"\n  [TRIGGER] 'No-Hit' encountered at f_shift = {f_shift/1000:.2f} km. Breaking out of raw scan loop.")
+                print(f"            Setting Bisection brackets:")
+                print(f"            -> f_b (No-Hit point, outer) = {f_b/1000:.2f} km")
+                print(f"            -> f_a (Hit point, inner)    = {f_a/1000:.2f} km")
+                print(f"            -> Raw bracket difference (f_a - f_b) = {(f_a - f_b)/1000:.4f} km")
                 break
             
             if f_shift > shift_end :
@@ -1672,11 +1642,23 @@ def footprint_mode2(s_func, # s_func muss entweder short_search2 oder sls_search
 
         print("\rProcessing distance complete", end='')
 
+        # =========================================================================
+        # NEW PIPELINE DEBUG: Final State Post-Loop Evaluation
+        # =========================================================================
+        final_f_ok_is_hit = is_hit(f_ok)
+        print("\n[NEW-DEBUG-BACKSCAN] Scan Loop Ended.")
+        print(f"  -> Final loop counter = {loop_counter}")
+        print(f"  -> Final f_shift status = {f_shift/1000:.2f} km")
+        print(f"  -> Final is_hit Evaluation Flag = {final_f_ok_is_hit}")
+        print(f"  -> Final assigned f_a = {f_a/1000:.2f} km | f_b = {f_b/1000:.2f} km")
+
         if is_hit(f_ok):
             print("\rFootprint's back edge is at the maximum missile range. Single part footprint.")
             fp_back1 = shift_end
             fp_single = True
         else :
+            
+            f_y_keep = f_ok
             while True :
                 f_x = f_a + (f_b - f_a) / 2
                 f_xy = s_func(t_trj, current_table, h_min, maxia, t_lnc, 0, f_x, op_range, det_range, t_delay, h_discr, concentric=concentric_flag)
@@ -1744,6 +1726,7 @@ def footprint_mode2(s_func, # s_func muss entweder short_search2 oder sls_search
                 print('\rNo second part of footprint found behind the first part.')
                 fp_single = True
             else :
+                f_y_keep = f_ok
                 while True :
                     f_x = f_a + (f_b - f_a) / 2
                     f_xy = s_func(t_trj, current_table, h_min, maxia, t_lnc, 0, f_x, op_range, det_range, t_delay, h_discr, concentric=concentric_flag)
@@ -1774,6 +1757,7 @@ def footprint_mode2(s_func, # s_func muss entweder short_search2 oder sls_search
                 else :
                     f_a = shift_beg
                     f_b = shift_end
+                    f_y_keep = f_ok
                     while True :
                         f_x = f_a + (f_b - f_a) / 2
                         f_xy = s_func(t_trj, current_table, h_min, maxia, t_lnc, 0, f_x, op_range, det_range, t_delay, h_discr, concentric=concentric_flag)
