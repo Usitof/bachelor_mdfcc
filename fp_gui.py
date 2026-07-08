@@ -1633,26 +1633,84 @@ def gui_mk_poly_data(ftprint_arr, mis_range, data_fname, mode2=False) :
             
             featurelist = []
 
-            for footprint in ftprint_arr :
-                if (len(footprint) > 0) and (len(footprint[0]) > 0) :
-                    for i0 in range(num_loc):
-                        ilon  = loclon[i0]
-                        ilat  = loclat[i0]
-                        angle = locsec[i0]
-                        iazm  = locazm[i0] #- angle/2
-                        #print("Main: iazm={} angle={} angle_step={}".format(iazm, angle, angle_step))
-                        df_path, df_fname = os.path.split(data_fname)
-                        df_name, df_ext   = os.path.splitext(df_fname)
-                        df_name += '.png'
-                        ifeaturelist = isec.ftp_intersection(footprint, ilon, ilat, iazm, azm_dist, angle, angle_step, root, df_name)
-    
-                        featurelist.extend(ifeaturelist)
+            for i_pair, fp_pair in enumerate(ftprint_arr) :
+                if (len(fp_pair) > 0) and (len(fp_pair[0]) > 0) :
+                    if type(fp_pair[0][0]) != np.ndarray : #i.e. mode1
+                        fp_pair = [fp_pair, []]
+                        md2 = False # mode 1
+                    else:
+                        md2 = True  # mode 2
+                    
+                    for footprint in fp_pair :
+                        if len(footprint) > 0 :
+                            
+                            for i0 in range(num_loc):
+                                ilon = loclon[i0]
+                                ilat = loclat[i0]
+                                angle = locsec[i0]
+                                iazm = locazm[i0]
+                                polylist = []
+                                
+                                if not md2 : # Mod1
+                                    fplen = len(footprint)
+                                    for i1 in range(fplen) :
+                                        az_i = iazm + footprint[i1][0]
+                                        s_i  = footprint[i1][1]
+                                        p_i = geo_sphere.Direct(ilat, ilon, az_i, s_i)
+                                        polylist.append([p_i['lon2'], p_i['lat2']])
+                                else :  	# Mod2 Footprint data array
+                                    fplen = len(footprint)
+                                    
+                                    # The main list 'ftprint_arr' is passed from 'plots_to_render' 
+                                    # structured as: [footprint_tab2, footprint_tab2_con].
+                                    # ftprint_arr[i_arr][0][:, 3/4] -> non-concentric coordinates
+                                    # ftprint_arr[i_arr][1][:, 3/4] -> concentric coordinates
+
+                                    is_concentric_trajectory = (i_pair == 1)
+                                        
+                                    if is_concentric_trajectory:
+                                        # concentric: direct orthogonal x/y projection
+                                        for i2 in range(fplen):
+                                            p__i = geo_sphere.Direct(ilat, ilon, iazm, footprint[i2][4] * 1000.0)
+                                            p_i  = geo_sphere.Direct(p__i['lat2'], p__i['lon2'], 90.0 + p__i['azi2'], footprint[i2][3] * 1000.0)
+                                            polylist.append([p_i['lon2'], p_i['lat2']])
+                                    else:
+                                        # non-concentric: polar transformation needed
+                                        shift = footprint[0][1]
+                                        mrange = shift - footprint[0][4] * 1000.0
+                                        for i2 in range(fplen) :
+                                            shift = footprint[i2][1]
+                                            p_i0 = geo_sphere.Direct(ilat, ilon, iazm, shift)
+                                            az_i = p_i0['azi2'] - 180.0 + degrees(footprint[i2][0])
+                                            if footprint[i2][2] == 2 :
+                                                p_i = geo_sphere.Direct(p_i0['lat2'], p_i0['lon2'], az_i, mrange * mrl_factor2)
+                                            elif footprint[i2][2] == 3 :
+                                                p_i = geo_sphere.Direct(p_i0['lat2'], p_i0['lon2'], az_i, mrange * mrl_factor1)
+                                            else :
+                                                p_i = geo_sphere.Direct(p_i0['lat2'], p_i0['lon2'], az_i, mrange)
+                                            polylist.append([p_i['lon2'], p_i['lat2']])
+
+                                if md2 and len(polylist) > 0:
+                                    transformed_footprint = []
+                                    for pt in polylist:
+                                        inv = geo_sphere.Inverse(ilat, ilon, pt[1], pt[0])
+                                        rel_az = inv['azi1'] - iazm
+                                    
+                                        transformed_footprint.append([rel_az, inv['s12'], 1])
+                                    footprint_to_pass = np.array(transformed_footprint)
+                                else:
+                                    footprint_to_pass = footprint
+
+                                df_path, df_fname = os.path.split(data_fname)
+                                df_name, df_ext   = os.path.splitext(df_fname)
+                                df_name += '.png'
+                                
+                                ifeaturelist = isec.ftp_intersection(footprint_to_pass, ilon, ilat, iazm, azm_dist, angle, angle_step, root, df_name)
+                                featurelist.extend(ifeaturelist)
                                 
                 else : #no footprint
                     pass
-                    #print("No Footprint to Plot")
-                    #return
-                
+
             fp_featcoll = geojson.FeatureCollection(featurelist)
             fp_featcoll_string = json.dumps(fp_featcoll, separators=(',', ':'))
 
@@ -1671,12 +1729,10 @@ def gui_mk_poly_data(ftprint_arr, mis_range, data_fname, mode2=False) :
             url = 'https://geojson.io/#data=data:application/json,' + uri
             
             try :
-                #pass
                 webbrowser.open(url, 1, True)
             except Exception as error :
                 print("*** An exception occurred: >>>", error, "<<<")
                 err_string = getattr(error, 'message', repr(error))
-                #print(err_string)
                 if "filepath too long" in err_string :
                     too_long_data_str = """* The data is too long to pass to the browser directly.
 * Save the file using \"Save footprints\" button and then 
@@ -1684,6 +1740,7 @@ def gui_mk_poly_data(ftprint_arr, mis_range, data_fname, mode2=False) :
                     print(too_long_data_str)
 
             return
+
 
         def calc_angles() :
             global num_loc
