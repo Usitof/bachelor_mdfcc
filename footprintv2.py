@@ -686,14 +686,13 @@ def plot_hit(hit_info,
 
         return itime, irad, ibeta, ialti
         
-    if isinstance(hit_info, np.ndarray) and hit_info.size == 5:
-        m_time = hit_info[0]
-        m_rad  = hit_info[1]
-        psi_deg = 0.0
-        t_flight = 0.0
+    if isinstance(hit_info, np.ndarray) and hit_info.size >= 7:
+        m_time   = hit_info[0]
+        m_rad    = hit_info[1]
+        psi_deg  = hit_info[5]      # interceptor launch fan angle [deg]
+        t_flight = hit_info[6]      # interceptor flight time [s]
         hit_m = np.array([m_time, m_rad, 0.0])
-        hit_i = np.array([radians(psi_deg), dist, t_flight,
-                          hit_info[3]/1000.0, hit_info[4]/1000.0])
+        hit_i = np.array([psi_deg, t_flight, dist, hit_info[3], hit_info[4]])
         hit_i1 = hit_i2 = None
     else:
         hit_i, hit_m, hit_i1, hit_i2 = hit_info

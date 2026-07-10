@@ -37,12 +37,12 @@ Column layout of int_table_v2 (angle-outer grid, one entry per theta ray):
 """
 
 import numpy as np
-from math import radians, degrees, cos, sin, acos, pi, sqrt, ceil
+from math import radians, degrees, cos, sin, acos, atan2, pi, sqrt, ceil
 from multiprocessing import Pool, cpu_count
 
 import balmis as bm
 import fcc_constants
-from fcc_constants import beta_step as set_beta_step, angle_eps, R_e, int_vl_height
+from fcc_constants import beta_step, alfa_step, angle_eps, R_e, int_vl_height
 
 # ---------------------------------------------------------------------------
 # Module-level Earth radius (metres)
@@ -106,7 +106,7 @@ def interceptor_table(interc_data, ind_flight_dataprint=False, psi_step=0.25):
     # max_psi = 120 covers both positive and negative flight path angles
     # (flight_path_angle = 90° - psi).  For psi > 90°, the interceptor
     # is launched downwards – necessary to reach points behind the ILP.
-    max_psi = 90   # increase to 180 if even flatter trajectories are needed
+    max_psi = 180   # increase to 180 if even flatter trajectories are needed
     psi_n   = int(max_psi / psi_step)
 
     worker_args = [(interc_data.copy(), psi_step, j) for j in range(psi_n)]
@@ -118,7 +118,7 @@ def interceptor_table(interc_data, ind_flight_dataprint=False, psi_step=0.25):
             int_table_0[i] = traj
             if i % 20 == 0 or i == psi_n - 1:
                 print(f"\r  {i / (psi_n - 1) * 100:5.1f}%  psi={i * psi_step:5.1f}°  "
-                      f"apogee={max_rv / 1000:7.1f} km", end="")
+                      f"apogee={(max_rv - R_e) / 1000:7.1f} km", end="")
 
     print("\n[Angle-Outer] Raw fan complete.")
     return int_table_0
@@ -129,7 +129,7 @@ def interceptor_table(interc_data, ind_flight_dataprint=False, psi_step=0.25):
 # ===========================================================================
 
 def interception_table(interceptor_data, int_table_v1,
-                       psi_step=0.25, theta_step_deg=fcc_constants.beta_step, concentric=True):
+                       psi_step=0.25, theta_step_deg=fcc_constants.alfa_step, concentric=True):
     """
     Build the angle-outer interception table.
 
@@ -142,7 +142,9 @@ def interception_table(interceptor_data, int_table_v1,
 
     Output columns per ray:  [psi_deg, time, rv_m, theta_j_rad]
     """
-
+    # =========================================================================
+    # MULTI-PACK UNWRAPPING GATEWAY (Sichert Form (122,) statt (3,))
+    # =========================================================================
     if int_table_v1 is not None and hasattr(int_table_v1, "__len__") and len(int_table_v1) == 3:
         if isinstance(int_table_v1, (list, np.ndarray)) and not isinstance(int_table_v1, dict):
             int_table_v1 = int_table_v1[2]
@@ -154,17 +156,18 @@ def interception_table(interceptor_data, int_table_v1,
 
     psi_n     = len(valid)
     all_alfa  = np.concatenate([t[:, 3] for t in valid])
-    theta_min = float(np.min(all_alfa))
+    theta_min = -float(np.max(all_alfa))
     theta_max = float(np.max(all_alfa))
+    print("minallalfa ", degrees(theta_min), " maxallalfa ", degrees(theta_max))
 
     theta_step_rad = radians(theta_step_deg)
     theta_grid     = np.arange(theta_min, theta_max + 1e-9, theta_step_rad)
-
-    theta_step_deg = 0.1  # Use a smaller step (e.g., 0.1°)
+    """
+    theta_step_deg = 0.01  # Use a smaller step (e.g., 0.1°)
     theta_min = 0.0       # Start at 0°
     theta_max = radians(90)  # Go up to 90°
     theta_grid = np.arange(theta_min, theta_max + 1e-9, radians(theta_step_deg))
-
+    """
     n_rays         = len(theta_grid)
 
     print(f"\n[Angle-Outer] Grid: theta {degrees(theta_min):.3f}° → "
@@ -176,7 +179,7 @@ def interception_table(interceptor_data, int_table_v1,
     for i_psi, traj in enumerate(valid):
         alfa  = traj[:, 3]   # monotone increasing geocentric angle [rad]
         n_pts = len(alfa)
-        psi_val = traj[0, 0]
+        psi_deg_val = traj[0, 0]
 
         for i_t in range(n_pts - 1):
             a1, a2 = alfa[i_t], alfa[i_t + 1]
@@ -200,7 +203,7 @@ def interception_table(interceptor_data, int_table_v1,
                 factor = max(0.0, min(1.0, factor))
                 i_rv   = rv1 + factor * (rv2 - rv1)
                 i_time = tm1 + factor * (tm2 - tm1)
-                ray_hits[k].append([psi_val, i_time, i_rv, theta_j])
+                ray_hits[k].append([psi_deg_val, i_time, i_rv, theta_j])
 
     print(f"\n[Angle-Outer] Hits collected. Building monotone envelope per ray...")
 
@@ -219,62 +222,28 @@ def interception_table(interceptor_data, int_table_v1,
 
         hits_arr = np.array(hits, dtype=np.float64)
 
-        # 1. Sortiere primär nach Zeit (aufsteigend) und sekundär nach Radius (absteigend)
-        # Das stellt sicher, dass bei identischer Zeit die maximale Höhe zuerst geprüft wird
-        hits_arr = hits_arr[np.lexsort((-hits_arr[:, 2], hits_arr[:, 1]))]
+        # Keep earliest time at each radius, full span, ascending radius.
+        gaps = np.diff(np.unique(hits_arr[:, 2]))
+        rv_tol = 0.25 * np.median(gaps) if len(gaps) else 0.0
 
-        # 2. Mathematisch korrekter Pareto-Filter für die Aufstiegs-Einhüllende:
-        # Ein Punkt ist nur dann valide, wenn er eine größere Höhe (Radius) erreicht 
-        # als alle bisherigen Punkte, die zu einem früheren oder gleichen Zeitpunkt existierten.
-        keep = [hits_arr[0]]
-        max_rv_so_far = hits_arr[0][2]
+        order = np.argsort(hits_arr[:, 2], kind='mergesort')
+        hits_arr = hits_arr[order]
 
-        for row in hits_arr[1:]:
-            current_rv = row[2]
-            current_time = row[1]
-            
-            if current_rv > max_rv_so_far:
-                keep.append(row)
-                max_rv_so_far = current_rv
-            elif current_rv == max_rv_so_far and current_time < keep[-1][1]:
-                # Gleiche Höhe, aber schneller erreicht -> Ersetzen
-                keep[-1] = row
+        tab_rows = []
+        i = 0
+        n = len(hits_arr)
+        while i < n:
+            j = i
+            r0 = hits_arr[i, 2]
+            best = hits_arr[i]
+            while j < n and hits_arr[j, 2] - r0 <= rv_tol:
+                if hits_arr[j, 1] < best[1]:
+                    best = hits_arr[j]
+                j += 1
+            tab_rows.append(best)
+            i = j
 
-        tab = np.array(keep, dtype=np.float64)
-
-        # Re‑sort by radius (Garantie für die Binärsuche in short_search)
-        tab = tab[tab[:, 2].argsort()]
-
-
-        # ----------------------------------------------------------------
-
-        # Backward-sweep (removes numerical artefacts)
-        tab_len = len(tab)
-        j = tab_len - 1
-        while j > 0:
-            dt = tab[j, 1] - tab[j-1, 1]
-            dr = tab[j, 2] - tab[j-1, 2]
-            if dt <= 0 or dr <= 0:
-                if dt > 0:
-                    tab = np.delete(tab, j, axis=0); tab_len -= 1
-                    if j == tab_len: j -= 1
-                elif dt == 0:
-                    if dr > 0:
-                        tab = np.delete(tab, j-1, axis=0); tab_len -= 1; j -= 1
-                    else:
-                        tab = np.delete(tab, j, axis=0); tab_len -= 1
-                        if j == tab_len: j -= 1
-                else:   # dt < 0
-                    if dr >= 0:
-                        tab = np.delete(tab, j-1, axis=0); tab_len -= 1; j -= 1
-                    else:
-                        tmp = tab[j].copy()
-                        tab[j] = tab[j-1]
-                        tab[j-1] = tmp
-                        j += 1
-                        if j == tab_len: j -= 1
-            else:
-                j -= 1
+        tab = np.array(tab_rows, dtype=np.float64)
 
         out.append(tab if len(tab) > 0 else np.array([[0.0, 0.0, _R_E, theta_j]], dtype=np.float64))
 
@@ -291,6 +260,7 @@ def mis_traj_sample(tar_trj, beta_step=None, psi_deg=0.0, phi_deg=0.0, concentri
     Resample the missile trajectory to a regular angular grid (beta_step).
     For concentric mode, psi_deg and phi_deg are ignored here; the spherical law of cosines
     mapping is done later in short_search.
+
     """
     psi_deg=0.0
     phi_deg=0.0
@@ -298,12 +268,15 @@ def mis_traj_sample(tar_trj, beta_step=None, psi_deg=0.0, phi_deg=0.0, concentri
     if tar_trj.ndim == 1:
         tar_trj = tar_trj.reshape(1, -1)
 
-    if beta_step is None:
-        beta_step = set_beta_step   # default from fcc_constants
+    #if beta_step is None:
+    #    beta_step = set_beta_step   # default from fcc_constants
 
     psi_rad = radians(psi_deg)
     phi_rad = radians(phi_deg)
-    bs_rad  = radians(float(beta_step))
+    if concentric:
+        bs_rad = radians(float(alfa_step))
+    else:
+        bs_rad = radians(float(beta_step))       
 
     alfa = tar_trj[:, 2]           # missile geocentric angles from MLP
     rv   = tar_trj[:, 1]           # geocentric radii [m]

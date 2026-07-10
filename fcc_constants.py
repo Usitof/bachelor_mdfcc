@@ -17,6 +17,7 @@ eps = 0.00001
 angle_eps = 0.000001
 psi_step  = 0.25 # angle step for interceptor trajectories
 beta_step = 0.1  # angle step for trajectories sampling (both interceptor and missile)
+alfa_step = 0.001 # in concentric mode: angle step for trajectories sampling (both interceptor and missile)
 #mrl_factor = 1.0  # index for zig-zagging footprint's max range line
 
 mrl_factor1 = 1.03  #1.03  # index for zig-zagging footprint's max range line
@@ -56,7 +57,7 @@ out_time_freq = 2 # every 2 seconds
 
 check_fpa = False # check interceptor's flight path angle, for debug
 
-version = "0.606.29c"
+version = "0.607.07c"
 cfg_fname_old = "footprint_config.json"
 cfg_fname = "fcc_config.json"
 rd_fname = "rocket_data.json"

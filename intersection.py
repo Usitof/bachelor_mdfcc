@@ -372,7 +372,7 @@ def draw_polygon(poly, title, lon, lat, azi, f_size, save_chart_fname='default',
     if f_size <= 1e-6:
         zoom_factor = 10  
     else:
-        zoom_factor = 4000 / f_size
+        zoom_factor = round(4000 / f_size, 2)
         
     if zoom_factor < 1 :
         zoom_factor = 1

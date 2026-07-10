@@ -1025,7 +1025,7 @@ def main_calc() :
         run_balmis_range_vs_gth_list()
     
     if exe_interceptor_table :
-        run_interceptor_table(concentric)
+        run_interceptor_table(itype, concentric=concentric)
     
     if exe_interception_table :
         run_interception_table(itype)        

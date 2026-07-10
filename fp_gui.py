@@ -1497,6 +1497,12 @@ def gui_mk_poly_data(ftprint_arr, mis_range, data_fname, mode2=False) :
                     else:
                         md2 = True  # mode 2
                     
+                    # The main list 'ftprint_arr' is passed from 'plots_to_render' 
+                    # structured as: [footprint_tab2, footprint_tab2_con].
+                    # ftprint_arr[i_arr][0][:, 3/4] -> non-concentric coordinates
+                    # ftprint_arr[i_arr][1][:, 3/4] -> concentric coordinates
+                    is_concentric_trajectory = (i_pair == 1)
+
                     for footprint in fp_pair :
                         if len(footprint) > 0 :
                             
@@ -1515,13 +1521,6 @@ def gui_mk_poly_data(ftprint_arr, mis_range, data_fname, mode2=False) :
                                 else :  	# Mod2 Footprint data array
                                     fplen = len(footprint)
                                     
-                                    # The main list 'ftprint_arr' is passed from 'plots_to_render' 
-                                    # structured as: [footprint_tab2, footprint_tab2_con].
-                                    # ftprint_arr[i_arr][0][:, 3/4] -> non-concentric coordinates
-                                    # ftprint_arr[i_arr][1][:, 3/4] -> concentric coordinates
-
-                                    is_concentric_trajectory = (i_pair == 1)
-                                        
                                     if is_concentric_trajectory:
                                         # concentric: direct orthogonal x/y projection
                                         for i2 in range(fplen):
@@ -1544,9 +1543,12 @@ def gui_mk_poly_data(ftprint_arr, mis_range, data_fname, mode2=False) :
                                                 p_i = geo_sphere.Direct(p_i0['lat2'], p_i0['lon2'], az_i, mrange)
                                             polylist.append([p_i['lon2'], p_i['lat2']])
 
-                                
+                                if is_concentric_trajectory:
+                                    fp_color = 'red'
+                                else:
+                                    fp_color = 'blue'
                                 fp_polygon = geojson.Polygon([polylist])
-                                poly_f = geojson.Feature(geometry = fp_polygon, properties = {'fill': 'blue', 'fill-opacity': 0.3})
+                                poly_f = geojson.Feature(geometry = fp_polygon, properties = {'fill': fp_color, 'stroke': fp_color, 'fill-opacity': 0.3})
                                 ilp_f0 = geojson.Point([ilon, ilat])
                                 ilp_f = geojson.Feature(geometry = ilp_f0, properties = {})
                     
@@ -1641,6 +1643,12 @@ def gui_mk_poly_data(ftprint_arr, mis_range, data_fname, mode2=False) :
                     else:
                         md2 = True  # mode 2
                     
+                    # The main list 'ftprint_arr' is passed from 'plots_to_render' 
+                    # structured as: [footprint_tab2, footprint_tab2_con].
+                    # ftprint_arr[i_arr][0][:, 3/4] -> non-concentric coordinates
+                    # ftprint_arr[i_arr][1][:, 3/4] -> concentric coordinates
+                    is_concentric_trajectory = (i_pair == 1)
+
                     for footprint in fp_pair :
                         if len(footprint) > 0 :
                             
@@ -1660,14 +1668,7 @@ def gui_mk_poly_data(ftprint_arr, mis_range, data_fname, mode2=False) :
                                         polylist.append([p_i['lon2'], p_i['lat2']])
                                 else :  	# Mod2 Footprint data array
                                     fplen = len(footprint)
-                                    
-                                    # The main list 'ftprint_arr' is passed from 'plots_to_render' 
-                                    # structured as: [footprint_tab2, footprint_tab2_con].
-                                    # ftprint_arr[i_arr][0][:, 3/4] -> non-concentric coordinates
-                                    # ftprint_arr[i_arr][1][:, 3/4] -> concentric coordinates
 
-                                    is_concentric_trajectory = (i_pair == 1)
-                                        
                                     if is_concentric_trajectory:
                                         # concentric: direct orthogonal x/y projection
                                         for i2 in range(fplen):
@@ -1706,6 +1707,12 @@ def gui_mk_poly_data(ftprint_arr, mis_range, data_fname, mode2=False) :
                                 df_name += '.png'
                                 
                                 ifeaturelist = isec.ftp_intersection(footprint_to_pass, ilon, ilat, iazm, azm_dist, angle, angle_step, root, df_name)
+                                current_color = 'red' if is_concentric_trajectory else 'blue'
+                                
+                                for feature in ifeaturelist:
+                                    feature['properties']['fill'] = current_color
+                                    feature['properties']['stroke'] = current_color
+
                                 featurelist.extend(ifeaturelist)
                                 
                 else : #no footprint
@@ -1740,8 +1747,7 @@ def gui_mk_poly_data(ftprint_arr, mis_range, data_fname, mode2=False) :
                     print(too_long_data_str)
 
             return
-
-
+        
         def calc_angles() :
             global num_loc
             global ent_loc_lat
@@ -2121,9 +2127,8 @@ def gui_fpchart_n(ftprint_arr,
             ax.grid()
         """ End of internal functions """
         
-        
         fp_draw()
-
+            
         ent_chart_fname = CEntry(chwin_row1, bg='white', width=50)
         ent_chart_fname.insert(0, new_chart_fname)
         btn_chart_save = Button(chwin_row1, text="Save Chart", command=fp_save)
@@ -2321,7 +2326,7 @@ def gui_footprint() :
     int_table = m.load_int_table(i_type, fcc_constants.psi_step, beta_step, rd_fname, t_stamp, set_keep_int_tables_var.get(), concentric=False)                
     
     if compare:
-        int_table_con = m.load_int_table(i_type, fcc_constants.psi_step, beta_step, rd_fname, t_stamp, set_keep_int_tables_var.get(), concentric=True)
+        int_table_con = m.load_int_table(i_type, fcc_constants.psi_step, alfa_step, rd_fname, t_stamp, set_keep_int_tables_var.get(), concentric=True)
     else:
         int_table_con = None
 
@@ -4784,6 +4789,34 @@ def gui_probing() : # routine's window shell, for actual routine see run_probing
 """ END of gui_probing_footprint """
 
 
+def gui_interceptor_table() :
+    if check_fpa :
+        print("Set check_fpa=False and restart the program.")
+        return False
+    
+    i_key = itype_var.get()
+
+    it_st = time.time()
+    print("x psi_step=", fcc_constants.psi_step)
+    print("Compare Mode =", fp_compare_var.get())
+
+    if fp_compare_var.get() == True:
+        print("\n Starting Angle-Elevation Interceptor Table Calculation (Compare Mode)")
+        # anlge-elevation calculation of table
+        m.run_interceptor_table(i_key, rd_fname, fcc_constants.psi_step, set_keep_int_tables_var.get(), concentric=False)
+        
+        print("\n Starting Concentric Interceptor Table Calculation (Compare Mode)")
+        # concentric calculation of table
+        m.run_interceptor_table(i_key, rd_fname, fcc_constants.psi_step, set_keep_int_tables_var.get(), concentric=True)
+        
+    else:
+        # default case: only anlge-elevation shell 
+        m.run_interceptor_table(i_key, rd_fname, fcc_constants.psi_step, set_keep_int_tables_var.get())
+
+    it_et = time.time()
+    it_elapsed_time = it_et - it_st
+    print("Interceptor table calculation time = {:.3f}s".format(it_elapsed_time))
+
 def gui_interception_table() :
     if check_fpa :
         print("Set check_fpa=False and restart the program.")
@@ -4798,22 +4831,22 @@ def gui_interception_table() :
     if fp_compare_var.get() == True:
         print("\n Starting Angle-Elevation Table Calculation (Compare Mode)")
         # anlge-elevation calculation of table
-        m.run_interceptor_table(i_key, rd_fname, fcc_constants.psi_step, set_keep_int_tables_var.get(), concentric=False)
+        #m.run_interceptor_table(i_key, rd_fname, fcc_constants.psi_step, set_keep_int_tables_var.get(), concentric=False)
         m.run_interception_table(i_key, rd_fname, fcc_constants.psi_step, beta_step, set_keep_int_tables_var.get(), set_int_table_samp_verify_var.get(), concentric=False)
         
         print("\n Starting Concentric Table Calculation (Compare Mode)")
         # concentric calculation of table
-        m.run_interceptor_table(i_key, rd_fname, fcc_constants.psi_step, set_keep_int_tables_var.get(), concentric=True)
-        m.run_interception_table(i_key, rd_fname, fcc_constants.psi_step, beta_step, set_keep_int_tables_var.get(), set_int_table_samp_verify_var.get(), concentric=True)
+        #m.run_interceptor_table(i_key, rd_fname, fcc_constants.psi_step, set_keep_int_tables_var.get(), concentric=True)
+        m.run_interception_table(i_key, rd_fname, fcc_constants.psi_step, alfa_step, set_keep_int_tables_var.get(), set_int_table_samp_verify_var.get(), concentric=True)
         
     else:
         # default case: only anlge-elevation shell 
-        m.run_interceptor_table(i_key, rd_fname, fcc_constants.psi_step, set_keep_int_tables_var.get())
+        #m.run_interceptor_table(i_key, rd_fname, fcc_constants.psi_step, set_keep_int_tables_var.get())
         m.run_interception_table(i_key, rd_fname, fcc_constants.psi_step, beta_step, set_keep_int_tables_var.get(), set_int_table_samp_verify_var.get())
 
     it_et = time.time()
     it_elapsed_time = it_et - it_st
-    print("Interceptor table calculation time = {:.3f}s".format(it_elapsed_time))
+    print("Interception table calculation time = {:.3f}s".format(it_elapsed_time))
 
 
 def missile_editor() :
@@ -5845,7 +5878,7 @@ if __name__ == '__main__':
     btn_interc_trajectory = Button(frame_ip, text='Interceptor Trajectory Data',   command=gui_interceptor_trajectory)
     btn_interc_trajcharts = Button(frame_ip, text='Interceptor Trajectory Charts', command=gui_interceptor_trajcharts)
     btn_interc_maxrange = Button(frame_ip, text='Interceptor Max Range Estimate', command=gui_interceptor_maxrange)
-    #btn_interc_traj_set = Button(frame_ip, text='Build Set of Interceptor Trajectories', command=m.run_interceptor_table)
+    btn_interc_traj_set = Button(frame_ip, text='Build Set of Interceptor Trajectories', command=gui_interceptor_table)
     btn_interc_table = Button(frame_ip, text='Build Interception Table', command=gui_interception_table)
     if tooltips: ToolTip(btn_interc_table, msg="This needs to be run if any trajectory-affecting parameter was changed for the interceptor", delay=1.0)
     
@@ -5853,9 +5886,9 @@ if __name__ == '__main__':
     btn_interc_trajectory.grid(column=0, row=1, sticky='ew')
     btn_interc_trajcharts.grid(column=0, row=2, sticky='ew')
     btn_interc_maxrange.grid(column=0, row=3, sticky='ew')
-    #btn_interc_traj_set.grid(column=0, row=2, sticky='ew')
     if show_extra_procs_var.get() :
-        btn_interc_table.grid(column=0, row=4, sticky='ew')
+        btn_interc_traj_set.grid(column=0, row=4, sticky='ew')
+        btn_interc_table.grid(column=0, row=5, sticky='ew')
         
     #rc_menu_string ='copy-paste-cut'
     #root.bind(right_click, lambda event, arg=rc_menu_string : show_rc_menu(event, arg))

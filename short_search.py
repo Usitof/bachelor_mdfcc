@@ -6,12 +6,170 @@ import footprintv2 as fp
 import numpy as np
 from math import pi, radians, degrees, sin, cos, acos, asin, tan, ceil, sqrt
 from fcc_constants import R_e, eps, angle_eps, out_time_freq, dist_limit, \
-    beta_step, ang_quant, mrl_factor1, mrl_factor2
+    beta_step, alfa_step, ang_quant, mrl_factor1, mrl_factor2
 import fcc_constants
 
 global dist_to_trj_min
 
 shift_min = 1000 # min distance between ILP and MLP
+
+# ===========================================================================
+# Concentric interception over the RAW missile trajectory.
+# Co-located here (only caller is short_search). Helpers are module-level.
+# See design notes: forward walk from t_int_lnc, two-ray-interpolated
+# interceptor flight time per raw point, first feasible point wins; the
+# footprint coordinate is the impact point (omega/shift/mrange), independent
+# of interception position, so no boundary interpolation is done.
+# ===========================================================================
+
+def _theta_ilp(xi, cos_psi, sin_psi, cos_phi):
+    """ILP-frame geocentric angle of a missile point at MLP angle xi (closed form)."""
+    c = cos_psi * cos(xi) + sin_psi * sin(xi) * cos_phi
+    if c > 1.0:
+        c = 1.0
+    elif c < -1.0:
+        c = -1.0
+    return acos(c)
+
+
+def _ray_time_at_radius(ray, m_rad):
+    """
+    Interceptor flight time to reach geocentric radius m_rad on one ray, by
+    radius bracket + linear interpolation in radius.
+    Returns (t, True) if m_rad is inside the ray's radius span, else (None, False).
+    ray columns: [psi_deg, time, rv, theta].
+    """
+    rr = ray[:, 2]
+    n = len(ray)
+    if n == 0 or m_rad < rr[0] or m_rad > rr[-1]:
+        return None, False
+    i_a, i_b = 0, n - 1
+    while (i_b - i_a) > 1:
+        i_x = (i_a + i_b) // 2
+        if rr[i_x] > m_rad:
+            i_b = i_x
+        else:
+            i_a = i_x
+    r1, r2 = rr[i_a], rr[i_b]
+    denom = r2 - r1
+    f = 0.0 if abs(denom) < 1e-12 else (m_rad - r1) / denom
+    t = ray[i_a, 1] + f * (ray[i_b, 1] - ray[i_a, 1])
+    psi = ray[i_a, 0] + f * (ray[i_b, 0] - ray[i_a, 0])
+    return (t, psi), True
+
+
+def _flight_time_two_ray(int_table, theta_grid, theta, m_rad):
+    """
+    Two-ray-interpolated interceptor flight time at ILP angle `theta` and radius
+    m_rad. Brackets theta between adjacent rays k, k+1; radius-brackets m_rad in
+    each; interpolates the two flight times by the angle fraction.
+
+    Returns dict with:
+      'reachable' : bool  (m_rad inside BOTH bracketing rays' spans)
+      't'         : interpolated flight time [s] if reachable, else None
+      'psi'       : interpolated launch fan angle [deg] if reachable, else None
+      'one_side'  : bool  (inside exactly one bracketing ray -> reach edge here)
+    theta_grid: ascending array of ray angles = [int_table[k][0,3]].
+    """
+    if theta < theta_grid[0] or theta > theta_grid[-1]:
+        return {'reachable': False, 't': None, 'psi': None, 'one_side': False}
+    k = int(np.searchsorted(theta_grid, theta, side='right') - 1)
+    k = max(0, min(k, len(int_table) - 2))
+    th_k, th_k1 = theta_grid[k], theta_grid[k + 1]
+    ray_k, ray_k1 = int_table[k], int_table[k + 1]
+
+    rk, ok_k = _ray_time_at_radius(ray_k, m_rad)
+    rk1, ok_k1 = _ray_time_at_radius(ray_k1, m_rad)
+
+    if ok_k and ok_k1:
+        denom = th_k1 - th_k
+        fa = 0.0 if abs(denom) < 1e-15 else (theta - th_k) / denom
+        t = rk[0] + fa * (rk1[0] - rk[0])
+        psi = rk[1] + fa * (rk1[1] - rk[1])
+        return {'reachable': True, 't': t, 'psi': psi, 'one_side': False}
+
+    if ok_k or ok_k1:
+        # inside exactly one bracketing ray: reachability edge in the angle
+        # direction. Not fully reachable for the two-ray interpolation.
+        return {'reachable': False, 't': None, 'psi': None, 'one_side': True}
+
+    return {'reachable': False, 't': None, 'psi': None, 'one_side': False}
+
+
+def concentric_intercept(trj, int_table, psi_rad, phi_rad,
+                         t_int_lnc, t_end, h_int_min, maxia, op_range,
+                         R_e):
+    """
+    Forward walk over the raw missile trajectory to decide whether a feasible
+    interception exists, returning the FIRST feasible raw point's metadata.
+
+    The footprint COORDINATE does not depend on where along the trajectory the
+    interception occurs (it is the missile impact point, computed by the caller
+    from omega/shift/mrange). So this function only needs a correct yes/no plus
+    the hit metadata (int_flight_time, int_psi_deg) for the chart/return. No
+    boundary interpolation is done.
+
+    Per-point feasibility requires ALL of:
+      - reachable: m_rad inside BOTH bracketing rays (two-ray interpolation valid)
+      - constraints: alt >= h_int_min, m_rad <= R_e+maxia (if maxia),
+                     m_rad <= op_range (if op_range)
+      - time: margin = (m_time - t_int_lnc) - int_flight_time >= 0
+
+    Returns [m_time, m_rad, xi, int_psi_deg, int_flight_time] on success,
+    or False if no feasible interception in the window.
+
+    Raw trajectory columns: [time_s, rv_m, xi_rad], xi non-decreasing.
+    Ray columns: [psi_deg, time_s, rv_m, theta_rad].
+    """
+    trj = np.asarray(trj, dtype=np.float64)
+    n = len(trj)
+    if n < 1:
+        return False
+
+    cos_psi = cos(psi_rad)
+    sin_psi = sin(psi_rad)
+    cos_phi = cos(phi_rad)
+
+    theta_grid = np.array([int_table[k][0, 3] for k in range(len(int_table))])
+
+    i0 = int(np.searchsorted(trj[:, 0], t_int_lnc, side='left'))
+    if i0 >= n:
+        return False
+
+    for i in range(i0, n):
+        m_time = trj[i, 0]
+        if m_time > t_end:
+            break
+        m_rad = trj[i, 1]
+        xi = trj[i, 2]
+
+        # constraints (independent of interceptor timing)
+        alt = m_rad - R_e
+        if alt < h_int_min:
+            continue
+        if maxia and m_rad > R_e + maxia:
+            continue
+        if op_range and m_rad > op_range:
+            continue
+
+        # reach + flight time via two-ray interpolation
+        theta = _theta_ilp(xi, cos_psi, sin_psi, cos_phi)
+        look = _flight_time_two_ray(int_table, theta_grid, theta, m_rad)
+        if not look['reachable']:
+            continue
+
+        # time feasibility
+        t_available = m_time - t_int_lnc
+        if look['t'] > t_available:
+            continue
+
+        # first feasible raw point wins
+        return np.array([m_time, m_rad, xi, look['psi'], look['t']],
+                        dtype=np.float64)
+
+    return False
+
+
 
 #@profile
 def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, op_range, det_range, 
@@ -91,31 +249,44 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
     
     if not sls_second:
         if det_range > 0:
+            # tar_traj[:, 3] is the local slant range to the ILP, set by
+            # trj_shift_turn for both concentric and classic mode2 geometry.
+            # It equals sqrt(R_e^2 + m_rad^2 - 2*R_e*m_rad*cos(theta_3d)) exactly,
+            # so there is no separate concentric recomputation.
+            while i_dr < max_idx and tar_traj[i_dr, 3] > det_range:
+                i_dr += 1
+                if i_dr == max_idx:
+                    if debug_print:
+                        print("short search exception: missile always beyond detection range")
+                    return False
+
+            t_int_lnc = max(t_bout, tar_traj[i_dr, 0]) + t_delay
+            """
             if concentric:
-                psi_rad = dist_opt / R_e 
-                phi_rad = fi_opt       
+                psi_rad = dist_opt / R_e # [rad] computed once above
+                phi_rad = fi_opt       # already radians
                 
-                valid_detection_found = False
-                
-                for idx in range(max_idx):
-                    m_rad  = tar_traj[idx, 1]
-                    m_beta = tar_traj[idx, 2] 
+                while i_dr < max_idx:
+                    m_rad  = tar_traj[i_dr, 1]
+                    m_beta = tar_traj[i_dr, 2] # alfa_r aus balmis
                     
                     cos_theta = cos(psi_rad) * cos(m_beta) + sin(psi_rad) * sin(m_beta) * cos(phi_rad)
                     cos_theta = max(-1.0, min(1.0, cos_theta))
                     theta_3d  = acos(cos_theta)
 
-                    slant_range = sqrt(R_e**2 + m_rad**2 - 2 * R_e * m_rad * cos(theta_3d))
-                    
+                    slant_range = sqrt(fcc_constants.R_e**2 + m_rad**2 - 2 * fcc_constants.R_e * m_rad * cos(theta_3d))
+                    #slant_range = tar_traj[i_dr, 3] - should be the same as above
                     if slant_range <= det_range:
-                        i_dr = idx
-                        valid_detection_found = True
                         break
-                
-                if not valid_detection_found:
-                    i_dr = max_idx - 1
+                    i_dr += 1
+                    
+                    if i_dr == max_idx:
+                        if debug_print:
+                            print("short search exception: missile always beyond detection range")
+                        return False
+#                        t_int_lnc = t_bout
+#                        break
             else:
-
                 while i_dr < max_idx and tar_traj[i_dr, 3] > det_range:
                     i_dr += 1
                     if i_dr == max_idx:
@@ -125,6 +296,8 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
                         
             if i_dr < max_idx or not concentric:
                 t_int_lnc = max(t_bout, tar_traj[i_dr, 0]) + t_delay
+            """
+
                 
         # --- Radar-Horizont-Kriterium (Over the Horizon Detection OHD) ---
         if t_delay != 0:
@@ -132,7 +305,8 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
             if concentric:
                 # 3D-CONCENTRIC HORIZONT: Spalte 2 hält den geozentrischen Zentralwinkel (alfa).
                 # Die Rakete steigt ab alfa = 0.0 sofort über den Horizont des ILP!
-                while i_ohd < max_idx and tar_traj[i_ohd, 2] <= 1e-6:
+#                while i_ohd < max_idx and tar_traj[i_ohd, 2] <= 1e-6:
+                while i_ohd < max_idx and tar_traj[i_ohd, 4] <= 0:
                     i_ohd += 1
                 
                 if i_ohd < len(tar_traj):
@@ -211,9 +385,29 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
     psi_d       = degrees(psi_rad_val)            # degrees – for mis_traj_sample and debug only
     phi_d       = degrees(fi_opt)                 # degrees – for mis_traj_sample only
 
+
     if concentric:
-        mis_traj = tb_con.mis_traj_sample(trj, beta_step=fcc_constants.beta_step, psi_deg=psi_d, phi_deg=phi_d, concentric=True) 
-                
+        # Raw-trajectory forward walk (co-located above). Returns the first
+        # feasible interception, or False. The footprint coordinate is the
+        # impact point (omega/shift/mrange), independent of interception
+        # position, so we return immediately on the yes/no result.
+        _hit = concentric_intercept(
+            trj, int_table, psi_rad_val, fi_opt,
+            t_int_lnc, t_end, h_int_min, maxia, op_range,
+            fcc_constants.R_e)
+        if _hit is False:
+            return False
+        # _hit = [m_time, m_rad, xi, int_psi_deg, int_flight_time]
+        m_time          = float(_hit[0])
+        m_rad           = float(_hit[1])
+        m_beta          = float(_hit[2])      # xi (MLP), for the return field
+        int_psi_deg     = float(_hit[3])
+        int_flight_time = float(_hit[4])
+        if mrange is None:
+            mrange = trj[-1, 2] * fcc_constants.R_e
+        hit_x_km, hit_z_km = omegashift_2_xy(fi_opt, dist_opt, mrange)
+        return np.array([m_time, m_rad, m_beta, hit_x_km, hit_z_km,
+                         int_psi_deg, int_flight_time])
     else:
         mis_traj = tb.mis_traj_sample(tar_traj)
 
@@ -231,160 +425,170 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
 
 
  
-    """ until 221116
-    i1_m_beg = 0
-    while mis_traj[i1_m_beg, 0] < t_int_lnc : # find number of the lowest (earliest) possible missile beta for interceptor launch
-        i1_m_beg += 1
-    i1_m_beg -= 1 # one before to compensate for sampling interval
-#    print("t_int_lnc={}, i1_m_beg = {}, mis_traj[i1_m_beg, 0]={}".format(t_int_lnc, i1_m_beg, mis_traj[i1_m_beg]))
-    """
-    
-    """ from 221117 """ 
-    i1m_a = 0                    # find number of the lowest (earliest) possible missile beta for interceptor launch
-    i1m_b = len(mis_traj) - 1
-    if mis_traj[i1m_b, 0] <= t_int_lnc : # trajectory ends before t_int_lnc
-        if debug_print : print("i1m_b = {}, mis_traj[i1m_b, 0] = {} <= t_int_lnc = {}".format(i1m_b, mis_traj[i1m_b, 0], t_int_lnc))
-        return False
-    else :
-        while (i1m_b - i1m_a) > 1 :
-            i1m_x = int(ceil(i1m_a + i1m_b) / 2)
-            f1m_x = mis_traj[i1m_x, 0] - t_int_lnc
-            if f1m_x > 0 :
-                i1m_b = i1m_x
-            elif f1m_x < 0 :
-                i1m_a = i1m_x
-            else :
-                i1m_a = i1m_x
-                break
-        i1_m_beg = i1m_a
-    
-    othi_r = -9
-    if oth_intercept > -999 : # for endo-atm if intercept has to be above start horizon by oth_intercept degrees
-        othi_r = radians(oth_intercept)
-        
-    i2_m_beg = 0 # find the number of the earliest missile beta equal to the lowest interceptor beta
-    #intemp = int_table[0]    
-    beta_zero = max(othi_r, int_table[0][0, 3])
-    
-    if concentric and beta_zero < 0.5:
-        beta_zero_rad = np.radians(1.0)  # Reicht aus, um den 0.03° Randfehler zu überspringen!
-    else:
-        beta_zero_rad = np.radians(beta_zero) if beta_zero > 1.5 else beta_zero
-
-    if not concentric:
-        while mis_traj[i2_m_beg, 2] < beta_zero_rad:
-            if i2_m_beg == len(mis_traj) - 1:
-                if debug_print: 
-                    print("False: all missile trajectory below lowest interceptor beta")
-                return False
-            i2_m_beg += 1
-    else:
-        # PHYSIKALISCHE SUCHE FÜR CONCENTRIC:
-        # Wir suchen chronologisch den ersten echten Punkt, an dem die Rakete über den Horizont kommt.
-        i2_m_beg = 0
-        found_valid_beta = False
-        
-        for idx in range(len(mis_traj)):
-            if mis_traj[idx, 2] >= beta_zero_rad:
-                # Absicherung: Wir überspringen den fehlerhaften allerersten Index am Boden
-                if idx > 1:
-                    i2_m_beg = idx
-                    found_valid_beta = True
-                    break
-                
-        if not found_valid_beta:
-            # Fallback auf den mathematischen Scheitelpunkt, falls die Rakete extrem flach bleibt
-            max_idx = 0
-            max_val = mis_traj[0, 2]
-            for idx in range(len(mis_traj)):
-                if mis_traj[idx, 2] > max_val:
-                    max_val = mis_traj[idx, 2]
-                    max_idx = idx
-            i2_m_beg = max_idx
-
-    m_beg = max(i1_m_beg, i2_m_beg)
-    beta_il = mis_traj[m_beg, 2]
-    # Max-Valid-Index bestimmen
-    max_valid_index = len(int_table) - 1
-    grid_step_rad = np.radians(fcc_constants.beta_step)
-
     if concentric:
-        table_beta_min = int_table[0][0, 3]
-        table_beta_max = int_table[-1][0, 3]
-        
-        beta_array = np.array([int_table[k][0, 3] for k in range(len(int_table))])
-        int_beta_il = int(np.argmin(np.abs(beta_array - beta_il)))
-        int_beta_il = max(0, min(int_beta_il, max_valid_index))
-        
-        current_eps = grid_step_rad * 0.51
-            
-        if beta_il < table_beta_min or beta_il > table_beta_max:
-            if debug_print:
-                print(f"[DEBUG CONCENTRIC] Kein Footprint: Raketen-Beta ({degrees(beta_il):.2f}°) "
-                      f"liegt außerhalb der Abfangtabelle ({degrees(table_beta_min):.2f}° - {degrees(table_beta_max):.2f}°)")
-            return False
-        
-        # print(f"\n[DEBUG CONCENTRIC] Rakete beta_il (deg): {degrees(beta_il):.2f} | Best Match Tabelle (deg): {degrees(int_table[int_beta_il][0, 3]):.2f}")
-    else:
-
-        # Originaler Suchalgorithmus für das flache 2D-Modell
+        # Walk output is already time-clipped to [t_int_lnc, t_end] and on
+        # the ILP grid, so the classic start-index / ray-match apparatus is
+        # unnecessary (and its mis_traj[:,2] reads assume the old resampled
+        # frame). Start at 0; int_beta_il is vestigial for concentric.
+        m_beg = 0
         int_beta_il = 0
-        current_eps = angle_eps
-        
-        if (int_table[int_beta_il][0, 3] > m_beta_max):
-            if debug_print: 
-                print("All of the possibly interceptable missile trajectory is below lowest interceptor beta")
+    else:
+        """ until 221116
+        i1_m_beg = 0
+        while mis_traj[i1_m_beg, 0] < t_int_lnc : # find number of the lowest (earliest) possible missile beta for interceptor launch
+            i1_m_beg += 1
+        i1_m_beg -= 1 # one before to compensate for sampling interval
+    #    print("t_int_lnc={}, i1_m_beg = {}, mis_traj[i1_m_beg, 0]={}".format(t_int_lnc, i1_m_beg, mis_traj[i1_m_beg]))
+        """
+    
+        """ from 221117 """ 
+        i1m_a = 0                    # find number of the lowest (earliest) possible missile beta for interceptor launch
+        i1m_b = len(mis_traj) - 1
+        if mis_traj[i1m_b, 0] <= t_int_lnc : # trajectory ends before t_int_lnc
+            if debug_print : print("i1m_b = {}, mis_traj[i1m_b, 0] = {} <= t_int_lnc = {}".format(i1m_b, mis_traj[i1m_b, 0], t_int_lnc))
             return False
+        else :
+            while (i1m_b - i1m_a) > 1 :
+                i1m_x = int(ceil(i1m_a + i1m_b) / 2)
+                f1m_x = mis_traj[i1m_x, 0] - t_int_lnc
+                if f1m_x > 0 :
+                    i1m_b = i1m_x
+                elif f1m_x < 0 :
+                    i1m_a = i1m_x
+                else :
+                    i1m_a = i1m_x
+                    break
+            i1_m_beg = i1m_a
+    
+        othi_r = -9
+        if oth_intercept > -999 : # for endo-atm if intercept has to be above start horizon by oth_intercept degrees
+            othi_r = radians(oth_intercept)
         
-                # Der originale Suchalgorithmus wird NUR im klassischen Modell fertig ausgeführt
-        while int_beta_il < max_valid_index and int_table[int_beta_il][0, 3] < (beta_il - current_eps):
-            int_beta_il += 1
-            if int_beta_il > max_valid_index:
-                int_beta_il = max_valid_index
-                break
+        i2_m_beg = 0 # find the number of the earliest missile beta equal to the lowest interceptor beta
+        #intemp = int_table[0]    
+        beta_zero = max(othi_r, int_table[0][0, 3])
+    
+        if concentric :#and beta_zero < 0.5:
+            #beta_zero_rad = np.radians(1.0)  # Reicht aus, um den 0.03° Randfehler zu überspringen!
+            # skip only the launch-pad edge artifact, not a fixed degree
+            beta_zero_rad = max(beta_zero, radians(fcc_constants.alfa_step) )#* 3.0)
+        else:
+            beta_zero_rad = beta_zero # np.radians(beta_zero) if beta_zero > 1.5 else beta_zero
 
-            if not np.any(int_table[int_beta_il]):
+        if not concentric:
+            while mis_traj[i2_m_beg, 2] < beta_zero_rad:
+                if i2_m_beg == len(mis_traj) - 1:
+                    if debug_print: 
+                        print("False: all missile trajectory below lowest interceptor beta")
+                    return False
+                i2_m_beg += 1
+        else:
+            # PHYSIKALISCHE SUCHE FÜR CONCENTRIC:
+            # Wir suchen chronologisch den ersten echten Punkt, an dem die Rakete über den Horizont kommt.
+            i2_m_beg = 0
+            found_valid_beta = False
+        
+            for idx in range(len(mis_traj)):
+                if mis_traj[idx, 2] >= beta_zero_rad:
+                    # Absicherung: Wir überspringen den fehlerhaften allerersten Index am Boden
+                    if idx > 1:
+                        i2_m_beg = idx
+                        found_valid_beta = True
+                        break
+                
+            if not found_valid_beta:
+                # Fallback auf den mathematischen Scheitelpunkt, falls die Rakete extrem flach bleibt
+                max_idx = 0
+                max_val = mis_traj[0, 2]
+                for idx in range(len(mis_traj)):
+                    if mis_traj[idx, 2] > max_val:
+                        max_val = mis_traj[idx, 2]
+                        max_idx = idx
+                i2_m_beg = max_idx
+
+        m_beg = max(i1_m_beg, i2_m_beg)
+        beta_il = mis_traj[m_beg, 2]
+        # Max-Valid-Index bestimmen
+        max_valid_index = len(int_table) - 1
+        grid_step_rad = np.radians(fcc_constants.alfa_step)
+
+        if concentric:
+            table_beta_min = int_table[0][0, 3]
+            table_beta_max = int_table[-1][0, 3]
+        
+            beta_array = np.array([int_table[k][0, 3] for k in range(len(int_table))])
+            int_beta_il = int(np.argmin(np.abs(beta_array - beta_il)))
+            int_beta_il = max(0, min(int_beta_il, max_valid_index))
+        
+            current_eps = grid_step_rad * 0.51
+            """
+            if beta_il < table_beta_min or beta_il > table_beta_max:
                 if debug_print:
-                    print("!!!", end='')
-                if abs(pi/2 - beta_il) < current_eps:
+                    print(f"[DEBUG CONCENTRIC] Kein Footprint: Raketen-Beta ({degrees(beta_il):.2f}°) "
+                          f"liegt außerhalb der Abfangtabelle ({degrees(table_beta_min):.2f}° - {degrees(table_beta_max):.2f}°)")
+                return False
+            """
+            # print(f"\n[DEBUG CONCENTRIC] Rakete beta_il (deg): {degrees(beta_il):.2f} | Best Match Tabelle (deg): {degrees(int_table[int_beta_il][0, 3]):.2f}")
+        else:
+
+            # Originaler Suchalgorithmus für das flache 2D-Modell
+            int_beta_il = 0
+            current_eps = angle_eps
+        
+            if (int_table[int_beta_il][0, 3] > m_beta_max):
+                if debug_print: 
+                    print("All of the possibly interceptable missile trajectory is below lowest interceptor beta")
+                return False
+        
+                    # Der originale Suchalgorithmus wird NUR im klassischen Modell fertig ausgeführt
+            while int_beta_il < max_valid_index and int_table[int_beta_il][0, 3] < (beta_il - current_eps):
+                int_beta_il += 1
+                if int_beta_il > max_valid_index:
                     int_beta_il = max_valid_index
                     break
-                else:
-                    m_beg += 1
-                    if m_beg >= len(mis_traj): 
+
+                if not np.any(int_table[int_beta_il]):
+                    if debug_print:
+                        print("!!!", end='')
+                    if abs(pi/2 - beta_il) < current_eps:
+                        int_beta_il = max_valid_index
                         break
-                    beta_il = mis_traj[m_beg, 2]           
-                    int_beta_il -= 1
+                    else:
+                        m_beg += 1
+                        if m_beg >= len(mis_traj): 
+                            break
+                        beta_il = mis_traj[m_beg, 2]           
+                        int_beta_il -= 1
 
-    # Das sichere Zeit- und Höhen-Debug-Print dynamisch ausführen
-    try:
-        ray = int_table[int_beta_il]
-        if ray is not None and len(ray) > 0 and ray[0, 3] != -1.0:
-            if concentric:
-                t_mis = mis_traj[m_beg, 0]
-                idx_closest = int(np.argmin(np.abs(ray[:, 1] - t_mis)))
-                int_flight_time = f"{ray[idx_closest, 1]:.1f}"
+        # Das sichere Zeit- und Höhen-Debug-Print dynamisch ausführen
+        try:
+            ray = int_table[int_beta_il]
+            if ray is not None and len(ray) > 0 and ray[0, 3] != -1.0:
+                if concentric:
+                    t_mis = mis_traj[m_beg, 0]
+                    idx_closest = int(np.argmin(np.abs(ray[:, 1] - t_mis)))
+                    int_flight_time = f"{ray[idx_closest, 1]:.1f}"
+                else:
+                    r_mis = mis_traj[m_beg, 1]
+                    idx_closest = int(np.argmin(np.abs(ray[:, 2] - r_mis)))
+                    int_flight_time = f"{ray[idx_closest, 1]:.1f}"
             else:
-                r_mis = mis_traj[m_beg, 1]
-                idx_closest = int(np.argmin(np.abs(ray[:, 2] - r_mis)))
-                int_flight_time = f"{ray[idx_closest, 1]:.1f}"
+                int_flight_time = "N/A (Leer)"
+        except Exception as e:
+            int_flight_time = f"Err ({str(e)})"
+
+        # WICHTIG: Das Epsilon für concentric absichern und den Reset-Winkel-Bug verhindern
+        if concentric:
+            current_eps = grid_step_rad * 0.51
         else:
-            int_flight_time = "N/A (Leer)"
-    except Exception as e:
-        int_flight_time = f"Err ({str(e)})"
+            current_eps = angle_eps
 
-    # WICHTIG: Das Epsilon für concentric absichern und den Reset-Winkel-Bug verhindern
-    if concentric:
-        current_eps = grid_step_rad * 0.51
-    else:
-        current_eps = angle_eps
-
-    # Plausibilitätsprüfung vor der Hauptschleife
-    if abs(int_table[int_beta_il][0, 3] - beta_il) > current_eps: 
-        if debug_print: 
-            print("short search exception: betas not equal. Delta too large.")
-        if not concentric:
-            return False
+        # Plausibilitätsprüfung vor der Hauptschleife
+        if abs(int_table[int_beta_il][0, 3] - beta_il) > current_eps: 
+            if debug_print: 
+                print("short search exception: betas not equal. Delta too large.")
+            if not concentric:
+                return False
 
 
     # =================================================================
@@ -400,7 +604,7 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
         phi_rad = fi_opt               # fi_opt is always in radians
         table_beta_min = int_table[0][0, 3]
         table_beta_max = int_table[-1][0, 3]
-        grid_step_rad  = radians(fcc_constants.beta_step)
+        grid_step_rad  = radians(fcc_constants.alfa_step)
         max_seg_idx    = len(int_table) - 1
 
     hit = False
@@ -413,22 +617,12 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
         y_rad  = mis_traj[i_m_beta, 4]
 
         if concentric:
-            # 1. Sphärischer Kosinussatz
-            cos_theta = cos(psi_rad) * cos(m_beta) + sin(psi_rad) * sin(m_beta) * cos(phi_rad)
-            cos_theta = max(-1.0, min(1.0, cos_theta))
-            theta_3d  = acos(cos_theta)
-
-            # 2. Nur innerhalb der Tabellengrenzen weitermachen
-            if theta_3d < table_beta_min - 1e-6 or theta_3d > table_beta_max + 1e-6:
-                if False and i_m_beta % 10 == 0:
-                    print(f"[CONC-DBG] i={i_m_beta}, xi={degrees(m_beta):.2f}°, "
-                          f"theta={degrees(theta_3d):.2f}° -> out of table bounds")
-                continue
-
-            # 3. Passenden Strahl finden
-            theta_grid = np.array([ray[0, 3] for ray in int_table if len(ray) > 0])
-            seg_idx = np.searchsorted(theta_grid, theta_3d, side='right') - 1
-            seg_idx = max(0, min(seg_idx, len(int_table) - 1))
+            # ILP angle and ray index are carried by the walk output:
+            #   col 3 = theta_ilp (exact table ray angle), col 4 = seg_idx.
+            # No per-point transform, no table-bounds gate (walk emits only
+            # in-bounds on-grid points), no nearest-ray snap.
+            theta_3d = mis_traj[i_m_beta, 3]
+            seg_idx  = int(mis_traj[i_m_beta, 4])
             ray = int_table[seg_idx]
 
             if ray is None or len(ray) == 0 or ray[0, 3] == -1.0:
@@ -483,7 +677,10 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
 
             # 6. Interzeptor‑Flugzeit interpolieren
             int_flight_time = ray[i_a, 1] + factor_r * (ray[i_b, 1] - ray[i_a, 1])
-
+            
+            int_psi_deg     = ray[i_a, 0] + factor_r * (ray[i_b, 0] - ray[i_a, 0]) # $$
+            
+            
             # 7. Zeitfenster prüfen
             t_available = m_time - t_int_lnc
             if debug_hits and i_m_beta % 10 == 0:
@@ -492,6 +689,7 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
                     print(" -> FAIL: too late")
                 else:
                     print(" -> HIT possible?")
+
 
             if int_flight_time > t_available:
                 continue
@@ -506,9 +704,12 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
             if False:
                 print(f"🎯 HIT at i={i_m_beta}, theta={degrees(theta_3d):.2f}°, "
                     f"alt={int_altitude/1000:.1f}km, t_miss={m_time:.1f}s, "
-                    f"t_int={int_flight_time:.1f}s, X={hit_x_m:.2f}km, Z={hit_z_m:.2f}km")
+                    f"t_int={int_flight_time:.1f}s, X={hit_x_km:.2f}km, Z={hit_z_km:.2f}km")
 
-            return np.array([m_time, m_rad, m_beta, hit_x_km, hit_z_km])
+ # concentric, just before: return np.array([...])
+            hit_ray_r = ray_r        # snapshot the accepted ray
+            return np.array([m_time, m_rad, m_beta, hit_x_km, hit_z_km, int_psi_deg, int_flight_time])
+            #return np.array([m_time, m_rad, m_beta, hit_x_km, hit_z_km])
 
         # ----------------------------------------------------------------
         # CLASSIC 2-D BRANCH (100% kompatibel isoliert)
@@ -601,6 +802,8 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
     # FINALE PIPELINE-KONFORME RÜCKGABE
     # =================================================================
     if hit:
+        # classic, just before: return hit
+        return hit
         return hit
     else:
         return False
@@ -1108,531 +1311,177 @@ def footprint_mode2(s_func, # s_func muss entweder short_search2 oder sls_search
                     i_type = 0,
                     t_itable_con = None
                     ) :
+    """
+    Mode2 (omega/shift) footprint. The search/bisection logic below is the
+    original short_search_old.footprint_mode2 algorithm, unchanged, wrapped
+    in _compute_part() so it can be run once against a classic table and
+    once against a concentric table.
 
-    # Dynamische Gitter- und Genauigkeitsanpassung für den Concentric-Modus
-    if t_itable_con is not None:
-        num_dist_internal = max(num_dist * 4, 60)
-        t_acc_internal = max(t_acc, 0.005)
-    else:
-        num_dist_internal = num_dist
-        t_acc_internal = t_acc
+    t_itable_con :
+        concentric interception table (tables_v2b_a-style angle-outer grid).
+        If None, only the classic search (against t_itable) is performed and
+        the concentric slot of the result is returned as empty placeholders.
 
-    fp_calc_param = 3
-    stop_par = 10
-    is_compare_mode = t_itable_con is not None
+    Returns
+    -------
+    [fp_part_std, fp_part_con]
+        each element has the original footprint_mode2 shape [fp_part1, fp_part2]
+        (or False, on the old exception paths below) -- fp_part_std from
+        searching t_itable with concentric=False, fp_part_con from searching
+        t_itable_con with concentric=True (or [zeros, zeros] if t_itable_con
+        is None).
+    """
 
-    def fp_part_calc_v3(fp_front, fp_back, num_steps=num_dist_internal, concentric=False) :
+    def _is_hit(result) :
         """
-        v3 -- Berechnet die Footprint-Grenzpunkte (omega) für jeden Shift-Schritt
-        sowie alle Zwischenpunkte mit einer gleichmäßigen Bogen- und Winkelschrittweite.
-        Garantierte raumstabile Uniform Accuracy im Concentric-Modus.
+        s_func (short_search2/sls_search2) returns a numpy array on a
+        concentric hit, and False/a tuple in classic mode. A bare `if result:`
+        on a multi-element array raises numpy's "truth value of an array is
+        ambiguous" error, so every boolean check on a search result goes
+        through here instead. The raw value itself (array, tuple or False)
+        is left untouched everywhere it's used for anything other than a
+        yes/no check (e.g. when handed to fp.plot_hit2 below).
         """
-        active_table = t_itable_con if concentric else t_itable
+        if isinstance(result, np.ndarray) :
+            return result.size > 0
+        return bool(result)
 
-        def is_hit(res):
-            """Return True if res is a valid hit for the current mode."""
-            if concentric:
-                return isinstance(res, np.ndarray) and res.size > 0
-            return bool(res)
+    def _compute_part(active_table, concentric) :
+        """
+        Original footprint_mode2 body (short_search_old), parameterised by
+        which interceptor table to search (active_table) and whether s_func
+        should run in concentric mode. Logic/structure is otherwise untouched,
+        aside from routing hit/miss checks through _is_hit() above.
+        """
+        fp_calc_param = 3
 
-        fp_part = np.array([[0, fp_front, 0, 0, (fp_front - mrange)/1000]])
-    
-        t_ang_beg = 0
-        t_ang_end = pi/2
-        stop_ang_par = stop_par / mrange 
-        
-        shift_beg = fp_front
-        shift_end = fp_back
-        
-        shift_step = (shift_end - shift_beg) / num_steps
+        stop_par = 10
 
-        f_shift = shift_beg
+        #int_max_range = max([int_traj[len(int_traj) - 1][2] for int_traj in active_table if np.any(int_traj)])
+        # this is in fact max r rather than max range
 
-        stm2 = time.process_time()
-        f_x  = t_ang_beg
-        f_x_keep = t_ang_beg
-        ang_quant_r = radians(min(angle_step, ang_quant))
-        
-        max_dist_line = False
-        is_first_step = True
-        
-        while f_shift - shift_end >= 0 : 
-            enm2 = time.process_time()
-            dum2 = enm2 - stm2
-            if dum2 >= out_time_freq :
-                print("\rProcessing distance {:6.0f} km...   ".format((f_shift - mrange)/1000), end='')
-                stm2 = enm2
-                
-            if concentric and is_first_step:
-                f_x = max(t_ang_beg, f_x)
-
-            p_dist_input = f_shift
-
-            f_ok = s_func(t_trj, active_table, h_min, maxia, t_lnc, f_x, p_dist_input, op_range, det_range, t_delay, h_discr, concentric=concentric)
-            
-            """if concentric:
-                print(f"[FP-DEBUG] shift={(f_shift/1000 if concentric else f_shift/1000):.1f} km, "
-                    f"omega={degrees(f_x):.1f}° -> f_ok is {type(f_ok)}")
-                if isinstance(f_ok, np.ndarray):
-                    print(f"hit coords: X={f_ok[3]:.2f} km, Z={f_ok[4]:.2f} km")
-                else:
-                    print("no hit")"""
-
-            if concentric and is_first_step and not is_hit(f_ok):
-                f_ok = s_func(t_trj, active_table, h_min, maxia, t_lnc, t_ang_beg, p_dist_input, op_range, det_range, t_delay, h_discr, concentric=concentric)
-            
-            is_first_step = False 
-
-            if is_hit(f_ok):
-                f_a = f_x
-                f_b = t_ang_end
-
-                while True :
-                    f_x = f_a + (f_b - f_a) / 2
-                    
-                    f_xy = s_func(t_trj, active_table, h_min, maxia, t_lnc, f_x, p_dist_input, op_range, det_range, t_delay, h_discr, concentric=concentric)
-                    
-                    if is_hit(f_xy) :
-                        f_a = f_x
-                    else :
-                        f_b = f_x
-                    if (abs(f_b - f_a) < f_b  * t_acc_internal) or (abs(f_b - f_a) < stop_ang_par) :
-                        break
-                        
-                fill_line = True
-                if f_b == t_ang_end :
-                    if max_dist_line : 
-                        fill_line = False
-                        f_shift_z = f_shift - shift_step/2
-                        
-                        if concentric:
-                            if concentric and isinstance(f_ok_local, np.ndarray) and f_ok_local.size >= 5:
-                                x = f_ok_local[3] 
-                                y = f_ok_local[4]
-                            else:
-                                continue
-                        else:
-                            x, y = omegashift_2_xy(f_a, f_shift_z, mrange * mrl_factor2)                
-                        
-                        fp_part = np.append(fp_part, [[f_a, f_shift_z, 2, x, y]], axis=0)
-                    else :
-                        max_dist_line = True 
-                else :
-                    max_dist_line = False
-
-                if fill_line :    
-                    f_x_num = round((f_a - f_x_keep) / ang_quant_r)
-                    if not f_x_num :
-                        f_x_num = 1
-                    f_x_step = (f_a - f_x_keep) / f_x_num
-                    for i in range(f_x_num) :
-                        f_x_i = f_x_keep + (i + 1) * f_x_step
-                        if f_shift == shift_beg :
-                            i_shift = f_shift
-                        else :
-                            i_shift = f_shift - shift_step + shift_step * (i + 1) / f_x_num
-                        
-                        target_shift = f_shift
-                        p_dist_local = i_shift
-                        
-                        if concentric:
-                            f_ok_local = s_func(t_trj, active_table, h_min, maxia, t_lnc, f_x_i, p_dist_local, op_range, det_range, t_delay, h_discr, concentric=True)
-                            
-                            if (f_ok_local is not False 
-                            and f_ok_local is not None 
-                            and hasattr(f_ok_local, "__len__") 
-                            and len(f_ok_local) > 4):
-                                x = f_ok_local[3]
-                                y = f_ok_local[4]
-                            else:
-                                continue
-                        else:
-                            x, y = omegashift_2_xy(f_x_i, i_shift, mrange)          
-                        
-                        if i == f_x_num - 1 :
-                            fp_part = np.append(fp_part, [[f_x_i, target_shift, f_b - f_a, x, y]], axis=0) 
-                        else :
-                            fp_part = np.append(fp_part, [[f_x_i, target_shift if concentric else i_shift, 1, x, y]], axis=0)        
-
-                f_x_keep = f_a
-                f_x = f_a
-            else : 
-                if concentric:
-                    f_b = f_x
-                    f_a = max(t_ang_beg, f_x_keep - radians(2.0))
-                else:
-                    f_b = f_x
-                    f_a = t_ang_beg
-
-                while True : 
-                    f_x = f_a + (f_b - f_a) / 2
-                    
-                    p_dist_fallback = f_shift
-                    f_xy = s_func(t_trj, active_table, h_min, maxia, t_lnc, f_x, p_dist_fallback, op_range, det_range, t_delay, h_discr, concentric=concentric)
-                    
-                    if is_hit(f_xy) :
-                        f_a = f_x
-                    else :
-                        f_b = f_x
-                    if (abs(f_b - f_a) < f_b  * t_acc_internal) or (abs(f_b - f_a) < stop_ang_par) : 
-                        break
-
-                f_x_num = round(abs(f_a - f_x_keep) / ang_quant_r)
-                if not f_x_num :
-                    f_x_num = 1
-                f_x_step = (f_a - f_x_keep) / f_x_num
-                for i in range(f_x_num) :
-                    f_x_i = f_x_keep + (i + 1) * f_x_step
-                    i_shift = f_shift - shift_step + shift_step * (i + 1) / f_x_num
-
-                    if concentric:
-                        p_dist_local_fb = i_shift
-                        f_ok_local = s_func(t_trj, active_table, h_min, maxia, t_lnc, f_x_i, p_dist_local_fb, op_range, det_range, t_delay, h_discr, concentric=True)
-                        
-                        if (f_ok_local is not False 
-                            and f_ok_local is not None 
-                            and hasattr(f_ok_local, "__len__") 
-                            and len(f_ok_local) > 4):
-                            x = f_ok_local[3]
-                            y = f_ok_local[4]
-                        else:
-                            continue
-                    else:
-                        x, y = omegashift_2_xy(f_x_i, i_shift, mrange)
-                        
-                    if i == f_x_num - 1 :
-                        fp_part = np.append(fp_part, [[f_x_i, f_shift, f_b - f_a, x, y]], axis=0) 
-                    else :
-                        fp_part = np.append(fp_part, [[f_x_i, i_shift, 1, x, y]], axis=0)         
-
-                f_x_keep = f_a
-                f_x = f_a
-
-            if concentric:
-                f_shift -= abs(shift_step)
-            else:
-                if f_shift > shift_end :
-                    f_shift += shift_step
-                    if f_shift < shift_end :
-                        f_shift = shift_end
-                else :
-                    f_shift += shift_step
-
-        pass 
-        
-        max_dist_line = False
-        f_a = t_ang_beg 
-        f_shift = shift_end
-        if abs(f_shift - shift_min) < shift_min :
-            ang_quant_r *= 2
-            max_dist_line = True
-            
-        f_x_num = round(abs(f_a - f_x_keep) / ang_quant_r)
-        if not f_x_num :
-            f_x_num = 1
-        f_x_step = (f_a - f_x_keep) / f_x_num
-        
-        p_dist_back = shift_end
-        target_shift_back = shift_end
-
-        for i in range(0, f_x_num) :
-            f_x_i = f_x_keep + (i + 1) * f_x_step
-            if max_dist_line :
-                f_x_i_half = f_x_keep + (i + 1/2) * f_x_step
-
-                if concentric:
-                    f_ok_local = s_func(t_trj, active_table, h_min, maxia, t_lnc, f_x_i_half, p_dist_back, op_range, det_range, t_delay, h_discr, concentric=True)
-                    if (f_ok_local is not False 
-                            and f_ok_local is not None 
-                            and hasattr(f_ok_local, "__len__") 
-                            and len(f_ok_local) > 4):
-                        x = f_ok_local[3]
-                        y = f_ok_local[4]
-                    else:
-                        continue
-                else:
-                    x, y = omegashift_2_xy(f_x_i_half, shift_end, mrange * mrl_factor2)                
-                fp_part = np.append(fp_part, [[f_x_i_half, target_shift_back, 2, x, y]], axis=0)
-                
-                if concentric:
-                    f_ok_local = s_func(t_trj, active_table, h_min, maxia, t_lnc, f_x_i, p_dist_back, op_range, det_range, t_delay, h_discr, concentric=True)
-                    if (f_ok_local is not False 
-                            and f_ok_local is not None 
-                            and hasattr(f_ok_local, "__len__") 
-                            and len(f_ok_local) > 4):
-                        x = f_ok_local[3]
-                        y = f_ok_local[4]
-                    else:
-                        continue
-                else:
-                    x, y = omegashift_2_xy(f_x_i, shift_end, mrange * mrl_factor1)                
-                fp_part = np.append(fp_part, [[f_x_i, target_shift_back, 3, x, y]], axis=0)
-            else :
-                if concentric:
-                    f_ok_local = s_func(t_trj, active_table, h_min, maxia, t_lnc, f_x_i, p_dist_back, op_range, det_range, t_delay, h_discr, concentric=True)
-                    if (f_ok_local is not False 
-                            and f_ok_local is not None 
-                            and hasattr(f_ok_local, "__len__") 
-                            and len(f_ok_local) > 4):
-                        x = f_ok_local[3]
-                        y = f_ok_local[4]
-                    else:
-                        continue
-                else:
-                    x, y = omegashift_2_xy(f_x_i, shift_end, mrange)                
-                fp_part = np.append(fp_part, [[f_x_i, target_shift_back, 1, x, y]], axis=0)
-
-        print("\rProcessing distance complete", end='')
-
-        if len(fp_part) > 0:
-            print(f"[FP-DEBUG] fp_part shape: {fp_part.shape}")
-            print(f"  first 3 rows:\n{fp_part[:3]}")
-            print(f"  last 3 rows:\n{fp_part[-3:]}")
-
-        # Symmetrische Spiegelung und polare Glättung (Rippel-Bereinigung)
-        # Symmetrische Spiegelung der berechneten Koordinatensegmente
-        len_fp_part = len(fp_part)
-        if len_fp_part > 0 :   
-            for i_f in range (len_fp_part - 1) :
-                fp_part_if = fp_part[len_fp_part - 2 - i_f]
-                fp_part = np.append(fp_part, [fp_part_if], axis=0)
-                fp_part[len_fp_part + i_f, 0] = - fp_part_if[0]
-                fp_part[len_fp_part + i_f, 3] = - fp_part_if[3]
-        
-            if concentric:
-                cx = np.mean(fp_part[:, 3])
-                cy = np.mean(fp_part[:, 4])
-                
-                angles = np.arctan2(fp_part[:, 4] - cy, fp_part[:, 3] - cx)
-                angles_deg = np.round(np.degrees(angles), 1) 
-                unique_angles = np.unique(angles_deg)
-                
-                cleaned_fp = []
-                for ua in unique_angles:
-                    mask = (angles_deg == ua)
-                    candidates = fp_part[mask]
-                    if len(candidates) > 0:
-                        radii = np.sqrt((candidates[:, 3] - cx)**2 + (candidates[:, 4] - cy)**2)
-                        cleaned_fp.append(candidates[np.argmax(radii)])
-                
-                fp_part = np.array(cleaned_fp)
-                
-                final_angles = np.arctan2(fp_part[:, 4] - cy, fp_part[:, 3] - cx)
-                fp_part = fp_part[final_angles.argsort()]
-                
-                if len(fp_part) > 1 and not np.array_equal(fp_part[0], fp_part[-1]):
-                    fp_part = np.vstack((fp_part, fp_part[0:1]))
-        else :
-            print("\nFootprint not calculated, check input data")
-            fp_part = np.zeros((0, 5))
-
-        if len(fp_part) > 0:
-            xs = fp_part[:, 3]
-            ys = fp_part[:, 4]
-            print(f"[FP-DEBUG] X range: {xs.min():.2f} to {xs.max():.2f} km, "
-                f"Y range: {ys.min():.2f} to {ys.max():.2f} km")
-            
-        return fp_part
-    """ end of fp_part_calc_v3 """
-
-
-    def run_footprint_pipeline(current_table, concentric_flag):
-        if concentric_flag:
-            # Angle-outer table: column 3 holds theta [rad] (central angle from ILP),
-            # column 2 holds rv [m] (geocentric radius).
-            # int_max_range = max arc length an interceptor can reach from the ILP.
-            max_rv = max(
-                row[2] for seg in current_table
-                if seg is not None and len(seg) > 0 and seg[0, 3] != -1.0
-                for row in seg
-            )
-            int_max_range = (max_rv - R_e)   # height is not range, use theta_max * R_e
-            # Better: use the largest theta in the table * R_e
-            max_theta = max(
-                float(seg[-1, 3]) for seg in current_table
-                if seg is not None and len(seg) > 0 and seg[0, 3] != -1.0
-            )
-            int_max_range = max_theta * R_e
+        beta_min = active_table[0][0, 3] - radians(alfa_step if concentric else beta_step)
+        int_max_range = -2 * beta_min * R_e # from basic geometry
+        if concentric:
+            print("alpha_min={:.2f}, concentric_max_separation={:.1f} km".format(degrees(beta_min), int_max_range/1000)) 
         else:
-            beta_min = current_table[0][0, 3] - radians(beta_step)
-            int_max_range = -2 * beta_min * R_e
-        print("beta_min={:.2f}, int_max_range={:.1f} km (Concentric={})".format(
-            degrees(current_table[0][0, 3]), int_max_range / 1000, concentric_flag))
+            print("beta_min={:.2f}, int_max_range={:.1f} km".format(degrees(beta_min), int_max_range/1000))
+        #print(m_type, i_type)
 
         f_alfa = t_trj[len(t_trj) - 1, 2]
-        global mrange
         mrange = f_alfa * R_e
-        fp_single = False   
-        dist_step = (shift_min - mrange) / num_dist 
-        
-        r_e_ref = float(R_e) if R_e > 1000000.0 else float(R_e) * 1000.0
+        fp_single = False   # assuming it is a two-part footprint unless proven otherwise
+        dist_step = (shift_min - mrange) / num_dist # negative value
 
-        def is_hit(res):
-            """Return True if res is a valid hit for the current mode."""
-            if concentric_flag:
-                return isinstance(res, np.ndarray) and res.size > 0
-            return bool(res)
-
-        p_dist_init = mrange
-        ilp_ok = s_func(t_trj, current_table, h_min, maxia, t_lnc, 0, p_dist_init, op_range, det_range, t_delay, h_discr, concentric=concentric_flag) 
-
-        if not is_hit(ilp_ok):
+        ilp_ok = s_func(t_trj, active_table, h_min, maxia, t_lnc, 0, mrange, op_range, det_range, t_delay, h_discr, concentric=concentric) # shift == mrange means ILP is the impact point
+        if not _is_hit(ilp_ok) : # ILP not defendable, find a defendable position behind it
             print("Interceptor position undefendable. Attempting to find a footprint behind(?) it...")
-            shift_beg = min((mrange + int_max_range), dist_limit)
-            shift_end = shift_min 
-            
-            if concentric_flag:
-                dist_step = (shift_end - shift_beg) / num_dist_internal
-            else:
-                dist_step = (shift_end - shift_beg) / num_dist 
-            
+            #shift_beg = mrange
+            shift_beg = min( (mrange + int_max_range), dist_limit)
+            shift_end = shift_min # smallest shift, corresponds to footprint's max distance behind the ILP
+            dist_step = (shift_end - shift_beg) / num_dist # negative value
+
             stm2 = time.process_time()
-            f_shift = shift_beg 
+            f_shift = shift_beg # f_shift is distance from ILP to MLP
             f_b = f_shift
-            
             while f_shift >= shift_end - .1 :
-                if f_shift < mrange * 0.1: 
-                    break
                 enm2 = time.process_time()
                 dum2 = enm2 - stm2
                 if dum2 >= 1 :
                     print("\rProcessing distance {:6.0f} km...   ".format((f_shift - mrange)/1000), end='')
                     stm2 = enm2
 
-                p_dist_loop = f_shift
-                f_ok = s_func(t_trj, current_table, h_min, maxia, t_lnc, 0, p_dist_loop, op_range, det_range, t_delay, h_discr, concentric=concentric_flag)
-                
-                if False:
-                    mode_str = "Concentric" if concentric_flag else "Classic"
-                    # Convert the argument to km for display
-                    displayed_dist = p_dist_loop / 1000.0
-                    hit_str = "HIT" if (isinstance(f_ok, np.ndarray) and f_ok.size > 0) or (not isinstance(f_ok, np.ndarray) and f_ok) else "no hit"
-                    print(f"[DEBUG-BEHIND] {mode_str}: shift={f_shift/1000:.1f} km, "
-                          f"s_func arg={displayed_dist:.1f} km, result={hit_str}")
-
-
-                if is_hit(f_ok):
+                f_ok = s_func(t_trj, active_table, h_min, maxia, t_lnc, 0, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                if _is_hit(f_ok) :
                     f_b = f_shift
                     f_a = f_shift - dist_step
                     break
-                
-                if concentric_flag:
-                    f_shift -= abs(dist_step)
-                else:
-                    f_shift += dist_step
-                    
+                f_shift += dist_step
+            #while f_shift
             if f_b > mrange :
                 print("\nFootprint in front of ILP", end='')
 
             print("\rProcessing distance complete", end='')
 
-            if not is_hit(f_ok):
-                mode_str = "Concentric" if concentric_flag else "Classic"
-                print(f"\n[DEBUG-PIPELINE] {mode_str}: No hit behind ILP after searching shifts.")
-                print(f"  Last f_shift = {f_shift/1000:.1f} km  (dist_step = {dist_step/1000:.1f} km)")
-                last_tested_shift = f_shift + dist_step if not concentric_flag else f_shift - dist_step
-                print(f"  Last tested shift = {last_tested_shift/1000:.1f} km")
-                print(f"  (s_func call used dist_opt = {p_dist_loop/1000 if not concentric_flag else p_dist_loop*R_e/1000:.1f} km)")
-                print(f"  Search range: shift_beg = {shift_beg/1000:.1f} km, shift_end = {shift_end/1000:.1f} km")
-
-            if not is_hit(f_ok) :
+            if not _is_hit(f_ok) :
                 print('\rNo footprint found behind undefendable interceptor position.\nIncreasing "Mode 2 Footprint number of steps" might help to find one.')
                 fp_part = np.zeros((0, 5))
                 return [fp_part, fp_part]
-           
-        else : 
-            # Regulärer Vorwärtslauf für den Front-Edge-Scan
-            f_shift = mrange + int_max_range / 8 
+
+        else : # ilp_ok == True
+            f_shift = mrange + int_max_range / 8 # f_shift is distance from ILP to impact point (??? -- must be to MLP)
+        #search for an undefendable point in front of the ILP
+        #beg        
             f_shift0 = mrange
-            f_ok = s_func(t_trj, current_table, h_min, maxia, t_lnc, 0, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric_flag)
-            
-            while is_hit(f_ok) :             
+            f_ok = s_func(t_trj, active_table, h_min, maxia, t_lnc, 0, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric)
+
+            while _is_hit(f_ok) :             
                 f_shift0 = f_shift
                 if f_shift >= int_max_range + mrange :
                     break
                 f_shift = f_shift * 2 - mrange
                 f_shift = min(f_shift, int_max_range + mrange)
-                f_ok = s_func(t_trj, current_table, h_min, maxia, t_lnc, 0, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric_flag)
+                f_ok = s_func(t_trj, active_table, h_min, maxia, t_lnc, 0, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric)
 
-            f_b = f_shift0
-            f_a = f_shift
-        
-        f_y_keep = f_ok
+            if True : #not f_ok :
+                f_b = f_shift0
+                f_a = f_shift
+            else :
+                print("\nProbing2 exception (a): f_shift = {:.2f} >= int_max_range + mrange = {:.2f}".format(f_shift, int_max_range + mrange))
+                print("(meaning: front edge of the footprint is at the interceptor's max range)")
+                return False
+
+        # f_a, f_b is the initial range for finding the forward border of the footprint, f_a > f_b    
+        #print("\nForward border between f_a = {:.2f} f_b = {:.2f}".format((f_a - mrange)/1000,(f_b - mrange)/1000))
         while True :
             f_x = f_a + (f_b - f_a) / 2
-            f_xy = s_func(t_trj, current_table, h_min, maxia, t_lnc, 0, f_x, op_range, det_range, t_delay, h_discr, concentric=concentric_flag)
-            xy_valid = (isinstance(f_xy, np.ndarray) and f_xy.size > 0) if concentric_flag else bool(f_xy)
-            if xy_valid:
+            f_xy = s_func(t_trj, active_table, h_min, maxia, t_lnc, 0, f_x, op_range, det_range, t_delay, h_discr, concentric=concentric)
+            if _is_hit(f_xy) :
                 f_b = f_x
                 f_y_keep = f_xy
             else :
                 f_a = f_x
-            if (abs(f_a - f_b) < abs(f_b - mrange) * t_acc) or (abs(f_a - f_b) < stop_par) : 
+                #f_y_keep = f_xy
+            if (abs(f_a - f_b) < abs(f_b - mrange) * t_acc) or (abs(f_a - f_b) < stop_par) : # "<10" to stop the cycle in case somehow f_a and f_b are on the same side
+                #print("\nf_a = {:.2f} f_b = {:.2f} f_b - f_a = {:.2f}".format((f_a - mrange)/1000,(f_b - mrange)/1000, (f_b - f_a)/1000))
                 break
 
-        if f_a <= int_max_range + mrange : 
+        if f_a <= int_max_range + mrange : # footprint outer edge is NOT farther than max
             if plot_hit_charts and i_type :
-                if f_a == dist_limit : 
+                if f_a == dist_limit : #int_max_range + mrange :
                     fp.plot_hit2(f_ok, t_trj, m_type, i_type, 0, f_a, int_max_range/1000, op_range, det_range, t_lnc - t_delay, h_min/1000, h_discr/1000)
                 else :
-                    fp.plot_hit2(f_y_keep, t_trj, m_type, i_type, 0, f_a, int_max_range/1000, op_range, det_range, t_lnc - t_delay, h_min/1000, h_discr/1000)
+                    pass
+                    fp.plot_hit2(f_y_keep, t_trj, m_type, i_type, 0, f_b, int_max_range/1000, op_range, det_range, t_lnc - t_delay, h_min/1000, h_discr/1000)
+
         else :
             print("\nProbing2 exception (b): f_a = {:.2f} > int_max_range = {:.2f}".format(f_a/1000, int_max_range/1000))
             return False
-            
+
+
         fp_front1 = f_b
         print("\rFront edge of the footprint found, location = {:.0f} km relative to ILP, looking for the back edge...".format((f_b - mrange)/1000))
-        # =========================================================================
-        # EXECUTION PIPELINE ROUTER - TEIL 2: BACK EDGE DETECTION & GRID FUSION
-        # =========================================================================
-        shift_beg = fp_front1  # Anschluss an das Ende von Teil 1
-        shift_end = shift_min 
-        dist_step = (shift_end - shift_beg) / num_dist 
-        
-        # =========================================================================
-        # NEW PIPELINE DEBUG: Initial Loop State Parameters
-        # =========================================================================
-        print("\n[NEW-DEBUG-BACKSCAN] Initialization Parameters:")
-        print(f"  -> shift_beg (Front edge)  = {shift_beg/1000:.2f} km (rel to ILP: {(shift_beg - mrange)/1000:.2f} km)")
-        print(f"  -> shift_end (Max search)  = {shift_end/1000:.2f} km (rel to ILP: {(shift_end - mrange)/1000:.2f} km)")
-        print(f"  -> dist_step (Signed delta)= {dist_step/1000:.4f} km")
-        print(f"  -> num_dist (Grid resolution) = {num_dist}")
-        print(f"  -> concentric_flag = {concentric_flag}")
-        
-        stm2 = time.process_time()
-        f_shift = shift_beg 
-        loop_counter = 0
 
+        shift_beg = f_b
+        shift_end = shift_min # smallest shift, corresponds to footprint's max distance behind the ILP
+        dist_step = (shift_end - shift_beg) / num_dist # negative value
+
+        stm2 = time.process_time()
+        f_shift = shift_beg # f_shift is distance from ILP to MLP
         while f_shift >= shift_end - .1 :
-            loop_counter += 1
             enm2 = time.process_time()
             dum2 = enm2 - stm2
             if dum2 >= out_time_freq :
                 print("\rProcessing distance {:6.0f} km...   ".format((f_shift - mrange)/1000), end='')
                 stm2 = enm2
 
-            # Run search function with mode flag passed down
-            f_ok = s_func(t_trj, current_table, h_min, maxia, t_lnc, 0, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric_flag)
-            
-            # =========================================================================
-            # NEW PIPELINE DEBUG: Step Evaluation Inside Loop
-            # =========================================================================
-            f_ok_is_hit = is_hit(f_ok)
-            print(f"  [Loop #{loop_counter}] Testing f_shift = {f_shift/1000:.2f} km (rel: {(f_shift - mrange)/1000:.2f} km) -> Hit status: {f_ok_is_hit}")
-            
-            if not f_ok_is_hit :
+            f_ok = s_func(t_trj, active_table, h_min, maxia, t_lnc, 0, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric)
+            #print(True if f_ok else False, f_shift)
+            if not _is_hit(f_ok) :
                 f_b = f_shift
                 f_a = f_shift - dist_step
-                # =========================================================================
-                # NEW PIPELINE DEBUG: Loop Break Conditions Triggers
-                # =========================================================================
-                print(f"\n  [TRIGGER] 'No-Hit' encountered at f_shift = {f_shift/1000:.2f} km. Breaking out of raw scan loop.")
-                print(f"            Setting Bisection brackets:")
-                print(f"            -> f_b (No-Hit point, outer) = {f_b/1000:.2f} km")
-                print(f"            -> f_a (Hit point, inner)    = {f_a/1000:.2f} km")
-                print(f"            -> Raw bracket difference (f_a - f_b) = {(f_a - f_b)/1000:.4f} km")
                 break
-            
+
             if f_shift > shift_end :
                 f_shift += dist_step
                 if f_shift < shift_end :
@@ -1640,66 +1489,47 @@ def footprint_mode2(s_func, # s_func muss entweder short_search2 oder sls_search
             else :
                 f_shift += dist_step
 
+
+        #print(True if f_ok else False, f_shift)
+
         print("\rProcessing distance complete", end='')
+        #print("\nf_a={:.0f}km f_b={:.0f}km f_shift={:.0f}km".format(f_a/1000, f_b/1000, f_shift/1000))
 
-        # =========================================================================
-        # NEW PIPELINE DEBUG: Final State Post-Loop Evaluation
-        # =========================================================================
-        final_f_ok_is_hit = is_hit(f_ok)
-        print("\n[NEW-DEBUG-BACKSCAN] Scan Loop Ended.")
-        print(f"  -> Final loop counter = {loop_counter}")
-        print(f"  -> Final f_shift status = {f_shift/1000:.2f} km")
-        print(f"  -> Final is_hit Evaluation Flag = {final_f_ok_is_hit}")
-        print(f"  -> Final assigned f_a = {f_a/1000:.2f} km | f_b = {f_b/1000:.2f} km")
-
-        if is_hit(f_ok):
+        if _is_hit(f_ok) :
             print("\rFootprint's back edge is at the maximum missile range. Single part footprint.")
             fp_back1 = shift_end
             fp_single = True
         else :
-            
-            f_y_keep = f_ok
+            #print(f_ok, f_shift)
             while True :
                 f_x = f_a + (f_b - f_a) / 2
-                f_xy = s_func(t_trj, current_table, h_min, maxia, t_lnc, 0, f_x, op_range, det_range, t_delay, h_discr, concentric=concentric_flag)
-                if is_hit(f_xy) :
+                f_xy = s_func(t_trj, active_table, h_min, maxia, t_lnc, 0, f_x, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                if _is_hit(f_xy) :
                     f_a = f_x
                     f_y_keep = f_xy
                 else :
                     f_b = f_x
-                
-                if concentric_flag:
-                    dynamic_stop = max(stop_par, (abs(f_x) / R_e) * stop_par * 10.0)
-                else:
-                    dynamic_stop = stop_par
-
-                if ((f_a - f_b) < (f_a - mrange) * t_acc) or (abs(f_a - f_b) < dynamic_stop) : 
+                if ((f_a - f_b) < (f_a - mrange) * t_acc) or ((f_a - f_b) < stop_par) : # "<10" to stop the cycle in case somehow f_a and f_b are on the same side
                     break
             fp_back1 = f_a
-            print("\rBack edge of the footprint found, location = {:.0f} km relative to ILP.".format((f_a - mrange)/1000))
-
-            print("Looking for the footprint's second part...")
+            print("\rBack  edge of the footprint found, location = {:.0f} km relative to ILP, looking for the footprint's second part...".format((f_a - mrange)/1000))
 
             if plot_hit_charts and i_type :
-                if f_a == dist_limit : 
+                if f_a == dist_limit : #int_max_range + mrange :
                     fp.plot_hit2(f_ok, t_trj, m_type, i_type, 0, f_a, int_max_range/1000, op_range, det_range, t_lnc - t_delay, h_min/1000, h_discr/1000)
                 else :
+                    pass
                     fp.plot_hit2(f_y_keep, t_trj, m_type, i_type, 0, f_a, int_max_range/1000, op_range, det_range, t_lnc - t_delay, h_min/1000, h_discr/1000)
-                    
+
         """ Search for the second part of the footprint """
         if not fp_single :
-            # Local helper to safely validate hits for both classic and concentric modes
-            def check_hit(f_res):
-                if concentric_flag:
-                    return isinstance(f_res, np.ndarray) and f_res.size > 0
-                return is_hit(f_res)
-
             shift_beg = f_b
-            shift_end = shift_min 
-            dist_step = (shift_end - shift_beg) / num_dist 
-            
+            #print("f_b = ", f_b)
+            shift_end = shift_min # smallest shift, corresponds to footprint's max distance behind the ILP
+            dist_step = (shift_end - shift_beg) / num_dist # negative value
+
             stm2 = time.process_time()
-            f_shift = shift_beg 
+            f_shift = shift_beg # f_shift is distance from ILP to MLP
             while f_shift >= shift_end - .1 :
                 enm2 = time.process_time()
                 dum2 = enm2 - stm2
@@ -1707,98 +1537,606 @@ def footprint_mode2(s_func, # s_func muss entweder short_search2 oder sls_search
                     print("\rProcessing distance {:6.0f} km...   ".format((f_shift - mrange)/1000), end='')
                     stm2 = enm2
 
-                f_ok = s_func(t_trj, current_table, h_min, maxia, t_lnc, 0, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric_flag)
-                
-                # Check hit using the safe helper
-                if check_hit(f_ok):
+                f_ok = s_func(t_trj, active_table, h_min, maxia, t_lnc, 0, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                #print("f_shift={:.3f} f_ok={}".format(f_shift, f_ok))
+                if _is_hit(f_ok) :
                     f_b = f_shift
                     f_a = f_shift - dist_step
-                    # Save the hit for later use (back‑edge extraction)
-                    # We need the missile time from the hit - in concentric it's f_ok[0]
                     break
-                
                 f_shift += dist_step
-                    
+                #print("f_shift={:.3f}".format(f_shift))
+            #while
             print("\rProcessing distance complete", end='')
 
-            # FIX: Use safe helper to avoid NumPy array truth ambiguity errors
-            if not check_hit(f_ok) :
-                print('\rNo second part of footprint found behind the first part.')
+            if not _is_hit(f_ok) :
+                print('\rNo second part of footprint found behind the first part.\nIncreasing "Mode 2 Footprint number of steps" might help to find one.')
                 fp_single = True
             else :
-                f_y_keep = f_ok
                 while True :
                     f_x = f_a + (f_b - f_a) / 2
-                    f_xy = s_func(t_trj, current_table, h_min, maxia, t_lnc, 0, f_x, op_range, det_range, t_delay, h_discr, concentric=concentric_flag)
-                    
-                    # FIX: Use safe helper inside bisection loop
-                    if check_hit(f_xy) :
+                    f_xy = s_func(t_trj, active_table, h_min, maxia, t_lnc, 0, f_x, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                    if _is_hit(f_xy) :
                         f_b = f_x
                         f_y_keep = f_xy
                     else :
                         f_a = f_x
-                    if (abs(f_a - f_b) < abs(f_b - mrange) * t_acc) or (abs(f_a - f_b) < stop_par) : 
+                        #f_y_keep = f_xy
+                    if (abs(f_a - f_b) < abs(f_b - mrange) * t_acc) or (abs(f_a - f_b) < stop_par) : # "<10" to stop the cycle in case somehow f_a and f_b are on the same side
                         break
+                #while
                 fp_front2 = f_b
-                print("\rFront edge of the second part found, location = {:.0f} km relative to ILP.".format((f_b - mrange)/1000))
+                print("\rFront edge of the second part of the footprint found, location = {:.0f} km relative to ILP, looking for the back edge...".format((f_b - mrange)/1000))
 
                 if plot_hit_charts and i_type :
-                    fp.plot_hit2(f_y_keep, t_trj, m_type, i_type, 0, f_b, int_max_range/1000, op_range, det_range, t_lnc - t_delay, h_min/1000, h_discr/1000)
+                    if f_a == dist_limit : #int_max_range + mrange :
+                        fp.plot_hit2(f_ok, t_trj, m_type, i_type, 0, f_a, int_max_range/1000, op_range, det_range, t_lnc - t_delay, h_min/1000, h_discr/1000)
+                    else :
+                        pass
+                        fp.plot_hit2(f_y_keep, t_trj, m_type, i_type, 0, f_b, int_max_range/1000, op_range, det_range, t_lnc - t_delay, h_min/1000, h_discr/1000)
 
                 shift_beg = f_b
-                shift_end = shift_min 
-                            
-                f_ok = s_func(t_trj, current_table, h_min, maxia, t_lnc, 0, shift_end, op_range, det_range, t_delay, h_discr, concentric=concentric_flag)        
-                
-                # FIX: Use safe helper here as well
-                if check_hit(f_ok):
+                shift_end = shift_min # smallest shift, corresponds to footprint's max distance behind the ILP
+
+                f_ok = s_func(t_trj, active_table, h_min, maxia, t_lnc, 0, shift_end, op_range, det_range, t_delay, h_discr, concentric=concentric)        
+                if _is_hit(f_ok) :
                     print("\nBack edge of the footprint's second part is at the maximum missile range")
                     fp_back2 = shift_end
                 else :
                     f_a = shift_beg
                     f_b = shift_end
-                    f_y_keep = f_ok
                     while True :
                         f_x = f_a + (f_b - f_a) / 2
-                        f_xy = s_func(t_trj, current_table, h_min, maxia, t_lnc, 0, f_x, op_range, det_range, t_delay, h_discr, concentric=concentric_flag)
-                        
-                        # FIX: Use safe helper inside rear bisection loop
-                        if check_hit(f_xy) :
+                        f_xy = s_func(t_trj, active_table, h_min, maxia, t_lnc, 0, f_x, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                        if _is_hit(f_xy) :
                             f_a = f_x
                             f_y_keep = f_xy
                         else :
                             f_b = f_x
-                        if ((f_a - f_b) < (f_a - mrange) * t_acc) or ((f_a - f_b) < stop_par) : 
+                        if ((f_a - f_b) < (f_a - mrange) * t_acc) or ((f_a - f_b) < stop_par) : # "<10" to stop the cycle in case somehow f_a and f_b are on the same side
                             break
                     fp_back2 = f_a
-                    print("\rBack  edge of the second part found, location = {:.0f} km relative to ILP.".format((f_a - mrange)/1000))
+                    print("\rBack  edge of the second part of the footprint found, location = {:.0f} km relative to ILP.".format((f_a - mrange)/1000))
+
+                    if plot_hit_charts and i_type :
+                        if f_a == dist_limit : #int_max_range + mrange :
+                            fp.plot_hit2(f_ok, t_trj, m_type, i_type, 0, f_a, int_max_range/1000, op_range, det_range, t_lnc - t_delay, h_min/1000, h_discr/1000)
+                        else :
+                            pass
+                            fp.plot_hit2(f_y_keep, t_trj, m_type, i_type, 0, f_b, int_max_range/1000, op_range, det_range, t_lnc - t_delay, h_min/1000, h_discr/1000)
+                #if f_ok
+            # if not f_ok
+        # if not fp_single
+
+        """
+        # function to calculate footprint part (works for both parts)           
+        def fp_part_calc(fp_front, fp_back) : 
+
+            #v1 -- calculates footprint border point (omega) for each shift, and connects them,
+            #not good for big gaps between omegas for adjacent shifts
+
+
+            fp_part = np.array([[0, fp_front, 0, 0, (fp_front - mrange)/1000]])
+
+            t_ang_beg = 0
+            t_ang_end = pi/2
+            angle_step_r = radians(angle_step)
+            stop_ang_par = stop_par / mrange
+
+            shift_beg = fp_front
+            shift_end = fp_back
+            shift_step = (shift_end - shift_beg) / num_dist
+
+            f_shift = shift_beg + shift_step
+
+            stm2 = time.process_time()
+            f_x  = pi/16
+            while f_shift >= shift_end - shift_step - .1 :
+                enm2 = time.process_time()
+                dum2 = enm2 - stm2
+                if dum2 >= out_time_freq :
+                    print("\rProcessing distance {:6.0f} km...   ".format((f_shift - mrange)/1000), end='')
+                    stm2 = enm2
+
+                f_x0 = t_ang_beg
+                f_ok = s_func(t_trj, active_table, h_min, t_lnc, f_x, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                while _is_hit(f_ok) :             
+                    f_x0 = f_x
+                    if f_x >= t_ang_end :
+                        break
+                    f_x *= 2
+                    f_x = min(f_x, t_ang_end)
+                    f_ok = s_func(t_trj, active_table, h_min, t_lnc, f_x, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                do_search = not _is_hit(f_ok) # == True only if f_x = pi/2, which shouldn't be impossible
+                f_a = f_x0
+                f_b = f_x
+
+                while do_search :
+                    f_x = f_a + (f_b - f_a) / 2
+                    f_xy = s_func(t_trj, active_table, h_min, t_lnc, f_x, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                    if _is_hit(f_xy) :
+                        f_a = f_x
+                    else :
+                        f_b = f_x
+                    if (abs(f_b - f_a) < f_b  * t_acc) or (abs(f_b - f_a) < stop_ang_par) : # "<stop_ang_par" to stop the cycle in case somehow f_a and f_b are on the same side
+                        break
+
+                f_x = f_b
+                if abs(f_a) <= angle_eps :
+                    x1 = 0
+                    y1 = (f_shift - mrange) / 1000
+                else :
+                    f_delta_x = asin(sin(f_a) * sin(f_alfa))
+                    f_gamma_y = asin(tan(f_delta_x) / tan(f_a))
+                    x1 = - f_delta_x * R_e / 1000
+                    y1 = (f_shift - f_gamma_y * R_e) / 1000
+
+                fp_part = np.append(fp_part, [[f_a, f_shift, f_b - f_a, x1, y1]], axis=0)
+
+                f_shift += shift_step
+            pass #while
+
+            # filling the back edge of the foot
+            fp_tmp = np.empty([0, 5])
+            f_ang = angle_step_r           
+            while f_ang < 90 :
+                f_ang_r = radians(f_ang)
+                #print("\rProcessing hindmost line at angle {}".format(f_ang), end='')
+                f_ok = s_func(t_trj, active_table, h_min, t_lnc, f_ang_r, shift_end, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                if _is_hit(f_ok) :
+                    if abs(f_ang_r) <= angle_eps :
+                        x1 = 0
+                        y1 = (shift_end - mrange) / 1000
+                    else :
+                        f_delta_x = asin(sin(f_ang_r) * sin(f_alfa))
+                        f_gamma_y = asin(tan(f_delta_x) / tan(f_ang_r))
+                        x1 = - f_delta_x * R_e / 1000
+                        y1 = (shift_end - f_gamma_y * R_e) / 1000
+
+                    fp_tmp = np.append(fp_tmp, [[f_ang_r, shift_end, 0, x1, y1]], axis=0)
+                else :
+                    break
+                f_ang += angle_step_r
+            # while
+
+            fp_tmp_len = len(fp_tmp)
+            for i in range(fp_tmp_len) :
+                fp_part = np.append(fp_part, [fp_tmp[fp_tmp_len - 1 - i]], axis=0)
+
+            fp_part = np.append(fp_part, [[0, fp_back, 0, 0, (fp_back - mrange)/1000]], axis=0)
+
+            print("\rProcessing distance complete", end='')
+
+            len_fp_part = len(fp_part)
+            if len_fp_part > 0 :   
+                for i_f in range (len_fp_part - 1) :
+                    fp_part_if = fp_part[len_fp_part - 2 - i_f]
+                    fp_part = np.append(fp_part, [fp_part_if], axis=0)
+                    fp_part[len_fp_part + i_f, 0] = - fp_part_if[0]
+                    fp_part[len_fp_part + i_f, 3] = - fp_part_if[3]
+                # for
+            else :
+                print("\nFootprint not calculated, check input data")
+                fp_part = np.zeros((0, 5))
+
+            return fp_part
+        """
+        """ end of fp_part_calc """
+
+        """
+        def fp_part_calc_adv(fp_front, fp_back) : # v2
+            """""""
+            v2 -- calculates footprint border point (omega) for each shift, as well as 
+            all points from omega of previous shift to the current omega, spaced by angle_step
+            not very good since creates "stairs" close to omegas
+            """""""
+
+            #fp_part = np.array([[0, fp_front, 0, 0, (fp_front - mrange)/1000]])
+            fp_part = np.empty([0, 5])
+
+            t_ang_beg = 0
+            t_ang_end = pi/2
+            stop_ang_par = stop_par / mrange # stop angle (search) parameter
+
+            shift_beg = fp_front
+            shift_end = fp_back
+            shift_step = (shift_end - shift_beg) / num_dist
+
+            f_shift = shift_beg
+
+            stm2 = time.process_time()
+            f_x0 = t_ang_beg
+            angle_step_r = radians(angle_step)
+            f_x  = t_ang_beg
+            count = 0 # so that the first point of the footprint is recorded
+            count_rate = 3
+
+            while f_shift >= shift_end - .1 :
+                enm2 = time.process_time()
+                dum2 = enm2 - stm2
+                if dum2 >= out_time_freq :
+                    print("\rProcessing distance {:6.0f} km...   ".format((f_shift - mrange)/1000), end='')
+                    stm2 = enm2
+
+                f_ok = s_func(t_trj, active_table, h_min, t_lnc, f_x, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                x, y = omegashift_2_xy(f_x, f_shift, mrange)
+                #print("\rf_x = {:.2f} degr f_shift = {:.2f} km x = {:.2f} km y = {:.2f} km".format(degrees(f_x), (f_shift)/1000, x, y))
+                if _is_hit(f_ok) :
+                    while _is_hit(f_ok) :
+                        if count % count_rate == 0  : # record every 5th 
+                            x, y = omegashift_2_xy(f_x, f_shift, mrange)
+                            fp_part = np.append(fp_part, [[f_x, f_shift, 0, x, y]], axis=0)
+                            count = 1
+                        else :
+                            count += 1
+                        f_x0 = f_x
+                        if f_x >= t_ang_end :
+                            break
+                        f_x += angle_step_r
+                        f_x = min(f_x, t_ang_end)
+                        f_ok = s_func(t_trj, active_table, h_min, t_lnc, f_x, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                    #while
+                    do_search = not _is_hit(f_ok)
+                    f_a = f_x0
+                    f_b = f_x
+
+                    while do_search :
+                        f_x = f_a + (f_b - f_a) / 2
+                        f_xy = s_func(t_trj, active_table, h_min, t_lnc, f_x, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                        if _is_hit(f_xy) :
+                            f_a = f_x
+                        else :
+                            f_b = f_x
+                        if (abs(f_b - f_a) < f_b  * t_acc) or (abs(f_b - f_a) < stop_ang_par) : # "<stop_ang_par" to stop the cycle in case somehow f_a and f_b are on the same side
+                            break
+                    #while
+                    f_x = f_a
+                    x, y = omegashift_2_xy(f_a, f_shift, mrange)                
+                    fp_part = np.append(fp_part, [[f_a, f_shift, f_b - f_a, x, y]], axis=0)
+
+                else : # f_x not in footprint at this shift
+                    while not _is_hit(f_ok) :
+                        if count % count_rate == 0 :
+                            x, y = omegashift_2_xy(f_x, f_shift - shift_step, mrange)
+                            #this needs to be previous f_shift, i.e. f_shift - shift_step
+                            fp_part = np.append(fp_part, [[f_x, f_shift - shift_step, 0, x, y]], axis=0)
+                            #print("\rf_x = {:.2f} degr f_shift - shift_step = {:.2f} km x = {:.2f} km y = {:.2f} km".format(degrees(f_x), (f_shift-shift_step)/1000, x, y))
+                        else :
+                            count += 1
+                        f_x0 = f_x
+                        if f_x <= t_ang_beg :
+                            break
+                        f_x -= angle_step_r
+                        f_x = max(f_x, t_ang_beg)
+                        f_ok = s_func(t_trj, active_table, h_min, t_lnc, f_x, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                    #while not f_ok
+
+                    do_search = _is_hit(f_ok)
+                    f_b = f_x0
+                    f_a = f_x
+
+                    while do_search :
+                        f_x = f_a + (f_b - f_a) / 2
+                        f_xy = s_func(t_trj, active_table, h_min, t_lnc, f_x, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                        if _is_hit(f_xy) :
+                            f_a = f_x
+                        else :
+                            f_b = f_x
+                        if (abs(f_b - f_a) < f_b  * t_acc) or (abs(f_b - f_a) < stop_ang_par) : # "<stop_ang_par" to stop the cycle in case somehow f_a and f_b are on the same side
+                            break
+                    #while
+
+                    f_x = f_a
+                    x, y = omegashift_2_xy(f_a, f_shift, mrange)                
+                    fp_part = np.append(fp_part, [[f_a, f_shift, f_b - f_a, x, y]], axis=0)
+                #else
+                count = 1
+                f_shift += shift_step
+            pass #while f_shift
+
+            # filling the back edge of the foot
+            fp_tmp = np.empty([0, 5])
+            f_ang = angle_step           
+            while f_ang < 90 :
+                f_ang_r = radians(f_ang)
+                #print("\rProcessing hindmost line at angle {}".format(f_ang), end='')
+                f_ok = s_func(t_trj, active_table, h_min, t_lnc, f_ang_r, shift_end, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                if _is_hit(f_ok) :
+                    x, y = omegashift_2_xy(f_ang_r, shift_end, mrange)
+                    fp_tmp = np.append(fp_tmp, [[f_ang_r, shift_end, 0, x, y]], axis=0)
+                else :
+                    break
+                f_ang += angle_step
+            # while
+
+            fp_tmp_len = len(fp_tmp)
+            for i in range(fp_tmp_len) :
+                fp_part = np.append(fp_part, [fp_tmp[fp_tmp_len - 1 - i]], axis=0)
+
+            fp_part = np.append(fp_part, [[0, fp_back, 0, 0, (fp_back - mrange)/1000]], axis=0)
+
+            print("\rProcessing distance complete", end='')
+
+            len_fp_part = len(fp_part)
+            if len_fp_part > 0 :   
+                for i_f in range (len_fp_part - 1) :
+                    fp_part_if = fp_part[len_fp_part - 2 - i_f]
+                    fp_part = np.append(fp_part, [fp_part_if], axis=0)
+                    fp_part[len_fp_part + i_f, 0] = - fp_part_if[0]
+                    fp_part[len_fp_part + i_f, 3] = - fp_part_if[3]
+                # for
+            else :
+                print("\nFootprint not calculated, check input data")
+                fp_part = np.zeros((0, 5))
+
+            return fp_part
+        """
+        """ end of fp_part_calc_adv """
+
+        def fp_part_calc_v3(fp_front, fp_back, num_steps=num_dist) :
+            """
+            v3 -- calculates footprint border point (omega) for each shift, as well as 
+            all points from omega of previous shift to the current omega, spaced by angle_step
+            and intrapolating shift value for those points -- creates a smooth line
+            """
+
+            fp_part = np.array([[0, fp_front, 0, 0, (fp_front - mrange)/1000]])
+            #fp_part = np.empty([0, 5])
+
+            t_ang_beg = 0
+            t_ang_end = pi/2#*3/4 #/2 + line 43 above (if fi_opt > pi/2 :)
+            stop_ang_par = stop_par / mrange # stop angle (search) parameter
+
+            shift_beg = fp_front
+            shift_end = fp_back
+            shift_step = (shift_end - shift_beg) / num_steps
+            #print("fp_front = {:.2f} km fp_back = {:.2f} km shift_step = {:.2f} km".format(fp_front/1000, fp_back/1000, shift_step/1000))
+
+            f_shift = shift_beg
+
+            stm2 = time.process_time()
+            #f_x0 = t_ang_beg
+            #angle_step_r = radians(angle_step)
+            f_x  = t_ang_beg
+            f_x_keep = t_ang_beg
+            ang_quant_r = radians(min(angle_step, ang_quant))
+
+            max_dist_line = False
+
+            while f_shift - shift_end >= 0 : 
+                enm2 = time.process_time()
+                dum2 = enm2 - stm2
+                if dum2 >= out_time_freq :
+                    print("\rProcessing distance {:6.0f} km...   ".format((f_shift - mrange)/1000), end='')
+                    stm2 = enm2
+
+                f_ok = s_func(t_trj, active_table, h_min, maxia, t_lnc, f_x, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                #x, y = omegashift_2_xy(f_x, f_shift, mrange)
+                #print("\rf_x = {:.2f} degr f_shift = {:.2f} km x = {:.2f} km y = {:.2f} km".format(degrees(f_x), (f_shift)/1000, x, y))
+                if _is_hit(f_ok) :
+                    """
+                    while False : #f_ok :
+                        f_x0 = f_x
+                        if f_x >= t_ang_end :
+                            break
+                        f_x += angle_step_r
+                        f_x = min(f_x, t_ang_end)
+                        f_ok = s_func(t_trj, active_table, h_min, t_lnc, f_x, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                    #while
+                    """
+                    #do_search = not _is_hit(f_ok)
+                    #f_a = f_x0
+                    #f_b = f_x
+
+                    f_a = f_x
+                    f_b = t_ang_end
+
+                    while True : #do_search :
+                        f_x = f_a + (f_b - f_a) / 2
+                        f_xy = s_func(t_trj, active_table, h_min, maxia, t_lnc, f_x, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                        #f_x_d = degrees(f_x) # for debugging
+                        if _is_hit(f_xy) :
+                            f_a = f_x
+                        else :
+                            f_b = f_x
+                        if (abs(f_b - f_a) < f_b  * t_acc) or (abs(f_b - f_a) < stop_ang_par) : # "<stop_ang_par" to stop the cycle in case somehow f_a and f_b are on the same side
+                            #print("f_b = {} f_a = {}".format(f_b, f_a))
+                            break
+                    #while
+                    fill_line = True
+                    if f_b == t_ang_end :
+                        if max_dist_line : # at least second successive point at max dist => put the zigzag between them
+                            fill_line = False
+                            #print(f_shift, degrees(f_b), degrees(f_a))
+                            f_shift_z = f_shift - shift_step/2
+                            x, y = omegashift_2_xy(f_a, f_shift_z, mrange * mrl_factor2)                
+                            #fp_part = np.append(fp_part, [[f_a, f_shift_z, f_b - f_a, x, y]], axis=0)
+                            fp_part = np.append(fp_part, [[f_a, f_shift_z, 2, x, y]], axis=0)
+                            x, y = omegashift_2_xy(f_a, f_shift, mrange * mrl_factor1)
+                            #fp_part = np.append(fp_part, [[f_a, f_shift, f_b - f_a, x, y]], axis=0)
+                            fp_part = np.append(fp_part, [[f_a, f_shift, 3, x, y]], axis=0)
+                        else :
+                            max_dist_line = True # first successive point at max dist
+                    else :
+                        max_dist_line = False
+
+                    if fill_line :    # fill line between points, which are not at max dist            
+                        f_x_num = round((f_a - f_x_keep) / ang_quant_r)
+                        if not f_x_num :
+                            f_x_num = 1
+                        f_x_step = (f_a - f_x_keep) / f_x_num
+                        for i in range(f_x_num) :
+                            f_x_i = f_x_keep + (i + 1) * f_x_step
+                            if f_shift == shift_beg :
+                                i_shift = f_shift
+                            else :
+                                i_shift = f_shift - shift_step + shift_step * (i + 1) / f_x_num
+                            x, y = omegashift_2_xy(f_x_i, i_shift, mrange)                
+                            if i == f_x_num - 1 :
+                                fp_part = np.append(fp_part, [[f_x_i, i_shift, f_b - f_a, x, y]], axis=0) # real point
+                            else :
+                                fp_part = np.append(fp_part, [[f_x_i, i_shift, 1, x, y]], axis=0)         # intrapolated points (except for the points at fp_front)
+
+                    f_x_keep = f_a
+                    f_x = f_a                    
+
+                else : # f_x not in footprint at this shift
+                    """
+                    while False : #not f_ok :
+                        #f_x0 = f_x
+                        if f_x <= t_ang_beg :
+                            break
+                        f_x -= angle_step_r
+                        f_x = max(f_x, t_ang_beg)
+                        f_ok = s_func(t_trj, active_table, h_min, t_lnc, f_x, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                    #while not f_ok
+                    """
+                    #do_search = _is_hit(f_ok)
+                    #f_b = f_x0
+                    #f_a = f_x
+
+                    f_b = f_x
+                    f_a = t_ang_beg
+
+                    while True : #do_search :
+                        f_x = f_a + (f_b - f_a) / 2
+                        f_xy = s_func(t_trj, active_table, h_min, maxia, t_lnc, f_x, f_shift, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                        if _is_hit(f_xy) :
+                            f_a = f_x
+                        else :
+                            f_b = f_x
+                        if (abs(f_b - f_a) < f_b  * t_acc) or (abs(f_b - f_a) < stop_ang_par) : # "<stop_ang_par" to stop the cycle in case somehow f_a and f_b are on the same side
+                            break
+                    #while
+                    f_x_num =  round(abs(f_a - f_x_keep) / ang_quant_r)
+                    if not f_x_num :
+                        f_x_num = 1
+                    f_x_step = (f_a - f_x_keep) / f_x_num
+                    for i in range(f_x_num) :
+                        f_x_i = f_x_keep + (i + 1) * f_x_step
+                        i_shift = f_shift - shift_step + shift_step * (i + 1) / f_x_num
+                        x, y = omegashift_2_xy(f_x_i, i_shift, mrange)
+                        if i == f_x_num - 1 :
+                            fp_part = np.append(fp_part, [[f_x_i, f_shift, f_b - f_a, x, y]], axis=0) # real point
+                        else :
+                            fp_part = np.append(fp_part, [[f_x_i, i_shift, 1, x, y]], axis=0)         # intrapolated points
+
+                    f_x_keep = f_a
+                    f_x = f_a
+                #else
+                if f_shift > shift_end :
+                    f_shift += shift_step
+                    if f_shift < shift_end :
+                        f_shift = shift_end
+                else :
+                    f_shift += shift_step
+
+            pass #while f_shift
+
+            # filling back edge of the footprint
+            max_dist_line = False
+            f_a = t_ang_beg # =0
+            f_shift = shift_end
+            if abs(f_shift - shift_min) < shift_min :
+                ang_quant_r *= 2
+                max_dist_line = True
+            f_x_num =  round(abs(f_a - f_x_keep) / ang_quant_r)
+            if not f_x_num :
+                f_x_num = 1
+            f_x_step = (f_a - f_x_keep) / f_x_num
+            for i in range(0, f_x_num) :
+                if max_dist_line :
+                    f_x_i = f_x_keep + (i + 1/2) * f_x_step
+                    x, y = omegashift_2_xy(f_x_i, shift_end, mrange * mrl_factor2)                
+                    fp_part = np.append(fp_part, [[f_x_i, shift_end, 2, x, y]], axis=0)
+
+                    f_x_i = f_x_keep + (i + 1) * f_x_step
+                    x, y = omegashift_2_xy(f_x_i, shift_end, mrange * mrl_factor1)                
+                    fp_part = np.append(fp_part, [[f_x_i, shift_end, 3, x, y]], axis=0)
+                else :
+                    f_x_i = f_x_keep + (i + 1) * f_x_step
+                    x, y = omegashift_2_xy(f_x_i, shift_end, mrange)                
+                    fp_part = np.append(fp_part, [[f_x_i, shift_end, 1, x, y]], axis=0)
+
+            """
+            fp_tmp = np.empty([0, 5])
+            f_ang = angle_step           
+            while f_ang <  :
+                f_ang_r = radians(f_ang)
+                #print("\rProcessing hindmost line at angle {}".format(f_ang), end='')
+                f_ok = s_func(t_trj, active_table, h_min, t_lnc, f_ang_r, shift_end, op_range, det_range, t_delay, h_discr, concentric=concentric)
+                if _is_hit(f_ok) :
+                    x, y = omegashift_2_xy(f_ang_r, shift_end, mrange)
+                    fp_tmp = np.append(fp_tmp, [[f_ang_r, shift_end, 0, x, y]], axis=0)
+                else :
+                    break
+                f_ang += angle_step
+            # while
+
+            fp_tmp_len = len(fp_tmp)
+            for i in range(fp_tmp_len) :
+                fp_part = np.append(fp_part, [fp_tmp[fp_tmp_len - 1 - i]], axis=0)
+
+            fp_part = np.append(fp_part, [[0, fp_back, 0, 0, (fp_back - mrange)/1000]], axis=0)
+            """
+            print("\rProcessing distance complete", end='')
+
+            len_fp_part = len(fp_part)
+            if len_fp_part > 0 :   
+                for i_f in range (len_fp_part - 1) :
+                    fp_part_if = fp_part[len_fp_part - 2 - i_f]
+                    fp_part = np.append(fp_part, [fp_part_if], axis=0)
+                    fp_part[len_fp_part + i_f, 0] = - fp_part_if[0]
+                    fp_part[len_fp_part + i_f, 3] = - fp_part_if[3]
+                # for
+            else :
+                print("\nFootprint not calculated, check input data")
+                fp_part = np.zeros((0, 5))
+
+            return fp_part
+        """ end of fp_part_calc_v3 """
 
         if fp_single :
             fp_part2 = np.zeros((0, 5))
+            #fp_part2 = []
             print("Calculating the footprint", end='')
         else :
             print("Calculating the first part of the footprint", end='')
-            
+
         if fp_calc_param == 3 :
-            fp_part1 = fp_part_calc_v3(fp_front1, fp_back1, concentric=concentric_flag)
-        
+            fp_part1 = fp_part_calc_v3(fp_front1, fp_back1)
+        """
+        elif fp_calc_param == 1 :
+            fp_part1 = fp_part_calc(fp_front1, fp_back1)
+        elif fp_calc_param == 2 :
+            fp_part1 = fp_part_calc_adv(fp_front1, fp_back1)
+        else :
+            print("\nFootprint mode2 calculation procedure not set")
+            return False
+        """    
         if not fp_single :
             print("\rCalculating the second (back) part of the footprint", end='')
             if fp_calc_param == 3 :
-                fp_part2 = fp_part_calc_v3(fp_front2, fp_back2, concentric=concentric_flag)
-                    
-        print("\rFootprint calculation complete (Concentric={})".format(concentric_flag))
+                #n_steps = max(round(num_dist * (fp_back2 - fp_front2) / (fp_back1 - fp_front1)), 20)
+                fp_part2 = fp_part_calc_v3(fp_front2, fp_back2) #, n_steps)
+            """
+            elif fp_calc_param == 1 :
+                fp_part2 = fp_part_calc(fp_front2, fp_back2)
+            else :
+                fp_part2 = fp_part_calc_adv(fp_front2, fp_back2)
+            """
+
+
+        print("\rFootprint calculation complete")
+
         return [fp_part1, fp_part2]
 
-    # =================================================================
-    # ÄUSSERER PIPELINE-START & RETURN FÜR DIE HAUPTFUNKTION
-    # =================================================================
-    fp_part_std = run_footprint_pipeline(t_itable, concentric_flag=False)
+    fp_part_std = _compute_part(t_itable, False)
 
-    if is_compare_mode:
-        fp_part_con = run_footprint_pipeline(t_itable_con, concentric_flag=True)
-        return [fp_part_std, fp_part_con]
-    else:
-        return [fp_part_std, [np.zeros((0, 5)), np.zeros((0, 5))]]
+    if t_itable_con is not None :
+        fp_part_con = _compute_part(t_itable_con, True)
+    else :
+        fp_part_con = [np.zeros((0, 5)), np.zeros((0, 5))]
+
+    return [fp_part_std, fp_part_con]
 
 """ End of footprint_mode2 """
