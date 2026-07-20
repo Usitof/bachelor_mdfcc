@@ -1,5 +1,5 @@
 import numpy as np
-from math import radians, sin, cos, tan,  degrees, sqrt, asin, pi
+from math import radians, sin, cos, tan,  degrees, sqrt, asin, acos, pi
 from cycler import cycler
 import matplotlib.pyplot as plt
 
@@ -19,6 +19,58 @@ shift_min = 1000
 #itype = 13
 
 global dist_to_trj_min
+
+
+def _is_hit(result) :
+    """
+    s_func (short_search2/sls_search2/short_search) returns a numpy array on
+    a concentric hit, and False/a tuple in classic mode. A bare `if result:`
+    on a multi-element array raises numpy's "truth value of an array is
+    ambiguous" error, so every boolean check on a search result goes through
+    here instead. The raw value itself is left untouched anywhere it's used
+    for anything other than a yes/no check.
+    """
+    if isinstance(result, np.ndarray) :
+        return result.size > 0
+    return bool(result)
+
+
+def _omegashift_2_xy(omega, shift, mrange) :
+    """
+    Local copy of short_search_new.omegashift_2_xy (same formula, kept in
+    sync by hand) -- short_search imports this module for plot_hit2, so
+    importing omegashift_2_xy back from there would be a circular import.
+    Converts shift/omega/mrange to an (x, y) km position centered on the ILP
+    via the spherical law of cosines. See that function's docstring for the
+    full derivation.
+    """
+    f_alfa = mrange / R_e
+    f_gamma = shift / R_e
+
+    if abs(omega) <= angle_eps :
+        fi = 0
+        dist = (shift - mrange) / 1000
+    else :
+        cos_delta = cos(f_gamma) * cos(f_alfa) + sin(f_gamma) * sin(f_alfa) * cos(omega)
+        cos_delta = max(-1.0, min(1.0, cos_delta))
+        f_delta = acos(cos_delta)
+
+        dist = f_delta * R_e / 1000
+
+        num_cos_fi = cos(f_alfa) - cos(f_gamma) * cos(f_delta)
+        den_sin_fi = sin(f_gamma) * sin(f_delta)
+
+        if abs(den_sin_fi) > 1e-12 :
+            cos_fi = num_cos_fi / den_sin_fi
+            cos_fi = max(-1.0, min(1.0, cos_fi))
+            fi = acos(cos_fi)
+        else :
+            fi = 0.0
+
+    x = -dist * sin(fi)
+    y =  dist * cos(fi)
+
+    return x, y
 
 
 def fp_point(queue, i_i, f_ang, t_dist, s_func, t_trj, t_itable, h_min, maxia, t_lnc, op_range, det_range, t_delay, h_discr, dist_max, t_acc) :
@@ -305,7 +357,7 @@ def footprint_calc_v2(s_func,
 
     stfp = time.process_time()
     
-    if ilp_ok :
+    if _is_hit(ilp_ok) :
         print("Ok.")
         ftprint = np.empty([0, 5]) 
     
@@ -331,7 +383,7 @@ def footprint_calc_v2(s_func,
 
             f_ok = s_func(t_trj, t_itable, h_min, maxia, t_lnc, f_ang_r, f_dist, op_range, det_range, t_delay, h_discr, concentric=concentric)
 
-            while f_ok :                
+            while _is_hit(f_ok) :                
                 f_dist0 = f_dist
                 if f_dist >= dist_max :
                     break
@@ -340,13 +392,13 @@ def footprint_calc_v2(s_func,
                 
                 f_ok = s_func(t_trj, t_itable, h_min, maxia, t_lnc, f_ang_r, f_dist, op_range, det_range, t_delay, h_discr, concentric=concentric)
 
-            do_search = not f_ok
+            do_search = not _is_hit(f_ok)
             f_a = f_dist0
             f_b = f_dist
             while do_search :
                 f_x = f_a + (f_b - f_a) / 2
                 f_xy = s_func(t_trj, t_itable, h_min, maxia, t_lnc, f_ang_r, f_x, op_range, det_range, t_delay, h_discr, concentric=concentric)
-                if f_xy :
+                if _is_hit(f_xy) :
                     f_a = f_x
                 else :
                     f_b = f_x
@@ -356,28 +408,15 @@ def footprint_calc_v2(s_func,
             if f_a == 0 :
                 f_a = f_b
 
-            # ====================================================================
-            # KORREKTUR: Mathematische 3D-Flächenaufspaltung (Löst den Linienkollaps!)
-            # ====================================================================
+            # For concentric, (f_ang, f_a) are (omega, shift) rather than a
+            # simple bearing/range to the impact point, so they need the
+            # same spherical-law-of-cosines unfold footprint_mode2 uses
+            # (_omegashift_2_xy), not a plain polar conversion -- plot_y
+            # otherwise ends up constant in f_ang (flat line, independent of
+            # angle) instead of tracing the actual footprint edge.
             if concentric:
-                # Da f_a aus den Terminal-Prints als reale, lineare Kilometer validiert wurde,
-                # nutzen wir f_a direkt als reelle Downrange (Y-Achse) relativ zum ILP.
-                # Wir spalten die Crossrange (X) polar auf, um die Breite des Eies zu erzwingen!
-                # Umrechnung von Metern in Kilometer für das Plot-Gitter.
-                planar_dist_km = abs(f_a) / 1000.0
-                
-                plot_x = -planar_dist_km * sin(f_ang_r)
-                plot_y = -planar_dist_km  # Starr an die echte Achsen-Entfernung gekoppelt
-                
-                # --- LIVE DEBUGGING FÜR BACHELORARBEIT ---
-                if abs(f_ang - 135.0) < 1e-3 or f_ang == 45.0:
-                    print(f"\n🚨 [DEBUG-PLOT3D] Kriterien-Check bei f_ang = {f_ang}°:")
-                    print(f"   • Ermittelte Grenzdistanz (f_a) : {f_a/1000:.2f} km")
-                    print(f"   • Zugewiesene Crossrange (plot_x): {plot_x:.2f} km")
-                    print(f"   • Zugewiesene Downrange (plot_y) : {plot_y:.2f} km")
-                    print("   ✅ MATHE FIXED: plot_x besitzt eine echte Breite und wird jetzt sicher abgespeichert!")
+                plot_x, plot_y = _omegashift_2_xy(f_ang_r, f_a, mrange)
             else:
-                # Klassischer 2D-Zweig (Unverändert)
                 plot_x = -f_a * sin(f_ang_r) / 1000.0
                 plot_y = f_a * cos(f_ang_r) / 1000.0
 
@@ -390,8 +429,9 @@ def footprint_calc_v2(s_func,
                         f_ang_z = f_ang + t_angle_step/2
                         f_ang_z_r = radians(f_ang_z)
                         if concentric:
-                            x_z = -planar_dist_km * sin(f_ang_z_r) * mrl_factor2
-                            y_z = plot_y * mrl_factor2
+                            x_z, y_z = _omegashift_2_xy(f_ang_z_r, f_a, mrange)
+                            x_z *= mrl_factor2
+                            y_z *= mrl_factor2
                         else:
                             x_z = -f_a * sin(f_ang_z_r) / 1000 * mrl_factor2
                             y_z = f_a * cos(f_ang_z_r) / 1000 * mrl_factor2
@@ -413,8 +453,9 @@ def footprint_calc_v2(s_func,
                         f_ang_z = f_ang + t_angle_step/2
                         f_ang_z_r = radians(f_ang_z)
                         if concentric:
-                            x_z = -planar_dist_km * sin(f_ang_z_r) * mrl_factor2
-                            y_z = plot_y * mrl_factor2
+                            x_z, y_z = _omegashift_2_xy(f_ang_z_r, f_a, mrange)
+                            x_z *= mrl_factor2
+                            y_z *= mrl_factor2
                         else:
                             x_z = -f_a * sin(f_ang_z_r) / 1000 * mrl_factor2
                             y_z = f_a * cos(f_ang_z_r) / 1000 * mrl_factor2
@@ -451,16 +492,14 @@ def footprint_calc_v2(s_func,
                     fp_fill = np.append(fp_fill, [ftprint[i_f + 1]], axis=0)
                 ftprint = fp_fill
         
-        # Mirror the half-footprint into a full one (KORREKTUR: Achsen-Invertierung im 3D-Modus)
+        # Mirror the half-footprint into a full one (reflect crossrange only)
         len_ftprint = len(ftprint)
         if len_ftprint > 0 :   
             for i_f in range (len_ftprint - 1) :
                 ftprint_if = ftprint[len_ftprint - 2 - i_f].copy()
                 ftprint = np.append(ftprint, [ftprint_if], axis=0)
                 ftprint[len_ftprint + i_f, 0] = 360 - ftprint_if[0]
-                ftprint[len_ftprint + i_f, 3] = -ftprint_if[3]  # Invertiert die Crossrange (X) gespiegelt
-                if concentric:
-                    ftprint[len_ftprint + i_f, 4] = ftprint_if[4]  # Behält Downrange (Z) auf der Achse
+                ftprint[len_ftprint + i_f, 3] = -ftprint_if[3]  # mirror crossrange (X); downrange (Y) unchanged
             return ftprint        
         else :
             print("Footprint not calculated, check input data")
@@ -618,6 +657,93 @@ def fp_chart_n__not_used(ftprint_arr, label_arr, info_string, title_string, f_na
     
     print("Chart saved to " + f_name)
     
+
+def plot_hit_verify(time, alti, itime, ialti, hit_m, hit_i, i_lnc_time,
+                     m_type, i_type, d_angle, dist, mode2,
+                     chart_fname='charts/hit_chart2.png') :
+    """
+    hit_chart2: a focused sanity check for one claimed interception.
+
+    plot_hit's hit_chart.png overlays a lot at once (beta, radius, altitude,
+    for both shells, over the whole missile flight). This zooms into just
+    the interceptor's flight window and shows one thing clearly: does the
+    interceptor's altitude actually reach the missile's altitude at the
+    claimed interception time? Top panel: missile vs interceptor altitude,
+    with the claimed hit marked on both curves. Bottom panel: the altitude
+    gap between them -- for a geometrically real hit this must run to ~0 km
+    right at the interception time; if it doesn't, the reported hit is
+    almost certainly a search/geometry bug, not a real intercept.
+    """
+    hit_time = hit_m[0]
+
+    flight_span = max(hit_time - i_lnc_time, 1.0)
+    t_lo = i_lnc_time - 0.10 * flight_span
+    t_hi = hit_time + 0.25 * flight_span
+
+    m_mask = (time >= t_lo) & (time <= t_hi)
+    i_mask = (itime >= t_lo) & (itime <= t_hi)
+    if not np.any(m_mask) :
+        m_mask = np.ones_like(time, dtype=bool)
+    if not np.any(i_mask) :
+        i_mask = np.ones_like(itime, dtype=bool)
+
+    # missile altitude interpolated onto the interceptor's own time samples,
+    # so the gap panel compares like-for-like even though the two
+    # trajectories aren't sampled on the same time grid
+    order = np.argsort(time)
+    m_alt_on_itime = np.interp(itime[i_mask], time[order], alti[order])
+    gap = np.abs(m_alt_on_itime - ialti[i_mask])
+
+    # hit_m[1] is *not* a consistent quantity to read the intercept altitude
+    # from: for the classic tuple path it's mis_traj's local ILP-relative
+    # range, for the concentric array path it's the raw geocentric radius --
+    # same index, two different physical quantities depending on which
+    # search produced it. Reading the marker off the trusted, already-correct
+    # altitude curves (interpolated at hit_time) sidesteps that entirely.
+    hit_alt_km = float(np.interp(hit_time, time[order], alti[order]))
+    order_i = np.argsort(itime)
+    hit_alt_km_i = float(np.interp(hit_time, itime[order_i], ialti[order_i]))
+
+    fig, (ax_alt, ax_gap) = plt.subplots(
+        2, 1, figsize=(8, 7), sharex=True,
+        gridspec_kw={'height_ratios': [2.2, 1]}
+    )
+
+    ax_alt.plot(time[m_mask], alti[m_mask], c='blue', linewidth=2, label='missile altitude')
+    ax_alt.plot(itime[i_mask], ialti[i_mask], c='green', linewidth=2, label='interceptor altitude')
+    ax_alt.plot(hit_time, hit_alt_km, marker='X', ms=14, mfc='red', mec='black',
+                linestyle='None', zorder=5, label='claimed intercept (missile curve)')
+    ax_alt.plot(hit_time, hit_alt_km_i, marker='+', ms=16, mew=3, mec='black',
+                linestyle='None', zorder=5, label='claimed intercept (interceptor curve)')
+
+    ax_alt.axvline(x=hit_time, c='red', linewidth=1, linestyle=':',
+                   label='interception time {:.2f}'.format(hit_time))
+    ax_alt.axvline(x=i_lnc_time, c='orange', linewidth=1, linestyle=':',
+                   label='interceptor launch {:.2f}'.format(i_lnc_time))
+
+    ax_alt.set_ylabel('Altitude, km')
+    ax_alt.legend(loc='best', frameon=False, framealpha=1.0, fontsize=9)
+
+    ax_gap.plot(itime[i_mask], gap, c='purple', linewidth=1.5)
+    ax_gap.axvline(x=hit_time, c='red', linewidth=1, linestyle=':')
+    ax_gap.axhline(y=0, c='gray', linewidth=0.75)
+    ax_gap.set_ylabel('|missile - interceptor|\naltitude gap, km')
+    ax_gap.set_xlabel('Time from missile launch, s')
+    ax_gap.set_xlim([t_lo, t_hi])
+
+    if not mode2 :
+        title = "Hit verification: mtype={} itype={} angle={:.1f} dist={:.1f} psi={:.2f}".format(
+            m_type, i_type, d_angle, dist / 1000, hit_i[0])
+    else :
+        title = "Hit verification: mtype={} itype={} angle={:.1f} shift={:.1f} psi={:.2f}".format(
+            m_type, i_type, d_angle, dist / 1000, hit_i[0])
+    fig.suptitle(title)
+
+    m.keep_old_file(chart_fname)
+    fig.savefig(chart_fname, dpi=300, bbox_inches='tight', pad_inches=0.2)
+    plt.close(fig)
+""" End of plot_hit_verify """
+
 
 def plot_hit(hit_info,
              trj_0,
@@ -802,6 +928,16 @@ def plot_hit(hit_info,
     m.keep_old_file(chart_fname)
     fig.savefig(chart_fname, dpi=300, bbox_inches='tight', pad_inches=0.2)
     plt.close()
+
+    # Also produce the zoomed hit-verification chart (hit_chart2.png by
+    # default) next to the main one, using the data already computed above.
+    if chart_fname.endswith('.png') :
+        chart_fname2 = chart_fname[:-4] + '2.png'
+    else :
+        chart_fname2 = chart_fname + '2'
+    plot_hit_verify(time, alti, itime, ialti, hit_m, hit_i, i_lnc_time,
+                     m_type, i_type, d_angle, dist, mode2,
+                     chart_fname=chart_fname2)
 
     
 """End of plot_hit() """
