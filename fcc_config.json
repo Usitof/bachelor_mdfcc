@@ -1,6 +1,6 @@
 {
-    "mtype": 4,
-    "itype": 18,
+    "mtype": 7,
+    "itype": 19,
     "h_int_min": 1.0,
     "h_discr": 0.0,
     "t_delay": 5.0,

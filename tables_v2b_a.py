@@ -156,7 +156,7 @@ def interception_table(interceptor_data, int_table_v1,
 
     psi_n     = len(valid)
     all_alfa  = np.concatenate([t[:, 3] for t in valid])
-    theta_min = -float(np.max(all_alfa))
+    theta_min = float(np.min(all_alfa))
     theta_max = float(np.max(all_alfa))
     print("minallalfa ", degrees(theta_min), " maxallalfa ", degrees(theta_max))
 

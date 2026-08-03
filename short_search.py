@@ -1183,20 +1183,23 @@ def footprint_mode2(s_func, # s_func muss entweder short_search2 oder sls_search
         #int_max_range = max([int_traj[len(int_traj) - 1][2] for int_traj in active_table if np.any(int_traj)])
         # this is in fact max r rather than max range
 
-        if concentric :
-            # active_table is theta-indexed (angle FROM the ILP, tables_v2b_a-style):
-            # ray 0 is ~0 (the ILP itself), not a signed "how far behind vertical"
-            # angle like classic beta, so beta_min's "-2*beta_min*R_e" doesn't carry
-            # over -- it would collapse to ~0 here and starve the front-edge search
-            # of any room to explore past the ILP. The table's actual reach is its
-            # LAST ray (theta_max), so use that directly as the range bound instead.
-            theta_max_val = active_table[-1][0, 3]
-            int_max_range = theta_max_val * R_e
-            print("theta_max={:.2f}, int_max_range={:.1f} km (concentric)".format(degrees(theta_max_val), int_max_range/1000))
-        else :
+        if concentric:
+            # CON table column 3 is theta (geocentric angle from ILP), starting at ~0.
+            # The STD formula assumes a NEGATIVE lowest elevation ray and collapses
+            # to ~2 km here, which truncates the whole front part of the footprint.
+            max_theta = max(
+                float(seg[-1, 3]) for seg in active_table
+                if seg is not None and len(seg) > 0 and seg[0, 3] != -1.0
+            )
+            beta_min = -max_theta / 2
+            int_max_range = max_theta * R_e
+            print("alpha_max={:.2f}, concentric_max_separation={:.1f} km".format(
+                degrees(max_theta), int_max_range / 1000))
+        else:
             beta_min = active_table[0][0, 3] - radians(beta_step)
-            int_max_range = -2 * beta_min * R_e # from basic geometry
-            print("beta_min={:.2f}, int_max_range={:.1f} km".format(degrees(beta_min), int_max_range/1000))
+            int_max_range = -2 * beta_min * R_e  # from basic geometry
+            print("beta_min={:.2f}, int_max_range={:.1f} km".format(
+                degrees(beta_min), int_max_range / 1000))
         #print(m_type, i_type)
 
         f_alfa = t_trj[len(t_trj) - 1, 2]
