@@ -135,10 +135,25 @@ def _concentric_forward_search(trj, int_table, psi_rad, phi_rad,
             continue
         if maxia and m_rad > R_e + maxia :
             continue
-        if op_range and m_rad > op_range :
-            continue
 
         theta = _theta_ilp(trj[i, 2], cos_psi, sin_psi, cos_phi)
+
+        if op_range :
+            # op_range is an ILP-relative straight-line range limit (matches
+            # the classic path's m_rad, which is tar_traj's local "r", not a
+            # geocentric radius). m_rad here *is* geocentric, so it has to be
+            # converted first -- law of cosines on the EarthCentre-ILP-missile
+            # triangle (R_e and m_rad as the two sides, theta the angle
+            # between them at Earth's centre) gives the exact slant range;
+            # comparing op_range against raw m_rad directly (as before) meant
+            # the check was almost always true, since m_rad is ~R_e and
+            # op_range is normally a few hundred/thousand km -- concentric
+            # would report no interception possible for any op_range > 0.
+            slant_range_sq = R_e * R_e + m_rad * m_rad - 2 * R_e * m_rad * cos(theta)
+            slant_range = sqrt(max(slant_range_sq, 0.0))
+            if slant_range > op_range :
+                continue
+
         look = _flight_time_two_ray(int_table, theta_grid, theta, m_rad)
         if not look['reachable'] :
             continue
