@@ -353,3 +353,126 @@ def mis_traj_sample(tar_trj, beta_step=None, psi_deg=0.0, phi_deg=0.0, concentri
                 n_out += 1 
 
     return out[:n_out]
+
+
+# ===========================================================================
+# 4.  Ray monotonicity check ("phantom" interception point detector)
+# ===========================================================================
+
+def check_ray_monotonicity(int_table_con):
+    """
+    Diagnostic for the angle-outer (concentric) interceptor table.
+
+    Each ray theta_j is built by interception_table() from whichever raw
+    trajectory (of the whole psi_launch fan) reaches (theta_j, rv) earliest,
+    independently for every radius bucket along the ray. Consecutive rows in
+    a ray -- "further along the beam", ascending rv -- are therefore not
+    necessarily samples of one continuous flight: the row that wins at one
+    radius bucket can come from a very different psi_launch than the row
+    that wins at the next. Where that happens, short_search's linear
+    interpolation between the two rows blends fragments of two unrelated
+    trajectories (e.g. one depressed, one lofted) into a "phantom" hit that
+    doesn't correspond to any real interceptor flight.
+
+    This function does not try to fix that -- it just walks each ray from
+    its lowest row ("underground", rv closest to R_e) to its highest
+    ("maximum altitude") and flags every place where the basic physical
+    requirement -- further along the beam must mean later in time -- is
+    violated, i.e. time step to the next row is negative.
+
+    Parameters
+    ----------
+    int_table_con : object ndarray
+        Output of interception_table(..., concentric=True): one entry per
+        theta ray, each an (n, 4) array of [psi_deg, time, rv, theta_j],
+        sorted ascending by rv.
+
+    Returns
+    -------
+    violations : list of dict
+        One entry per violating (row i, row i+1) pair, in ray order. Keys:
+        ray_index, theta_j_deg, row_index, rv_a_km, rv_b_km, t_a, t_b, dt
+        (t_b - t_a, negative by construction), psi_a_deg, psi_b_deg,
+        dpsi_deg (|psi_b - psi_a|, the tell for "two different trajectories
+        stitched together").
+    stats : dict
+        n_rays, n_rays_checked (>=2 rows), n_rays_with_violation,
+        n_pairs_checked, n_violations, worst_dt (most negative), and, among
+        violating pairs only, min/max/mean of dpsi_deg -- compare against
+        dpsi_all_mean (the same, over every pair, violating or not) to see
+        whether violations really do concentrate at large psi_launch jumps.
+    top_by_dt : list of dict
+        Top 10 violations with the worst (most negative) dt values.
+    top_by_dpsi : list of dict
+        Top 10 violations with the largest dpsi_deg jumps.
+    """
+
+    BIN_SIZE_DEG = 10.0
+    TOP_N = 10
+
+    violations = []
+    n_rays = len(int_table_con)
+    n_rays_checked = 0
+    n_pairs_checked = 0
+    dpsi_all = []
+
+    for k in range(n_rays):
+        ray = int_table_con[k]
+        if ray is None or len(ray) < 2:
+            continue
+        n_rays_checked += 1
+        theta_j = ray[0, 3]
+
+        for i in range(len(ray) - 1):
+            psi_a, t_a, rv_a = ray[i, 0], ray[i, 1], ray[i, 2]
+            psi_b, t_b, rv_b = ray[i + 1, 0], ray[i + 1, 1], ray[i + 1, 2]
+
+            if rv_b <= rv_a:
+                continue  # not actually further along the beam; shouldn't
+                          # happen given the table is rv-sorted, but guard anyway
+
+            n_pairs_checked += 1
+            dpsi = abs(psi_b - psi_a)
+            dpsi_all.append(dpsi)
+
+            if t_b < t_a:
+                violations.append({
+                    'ray_index': k,
+                    'theta_j_deg': degrees(theta_j),
+                    'row_index': i,
+                    'rv_a_km': rv_a / 1000.0, 'rv_b_km': rv_b / 1000.0,
+                    't_a': float(t_a), 't_b': float(t_b), 'dt': float(t_b - t_a),
+                    'psi_a_deg': float(psi_a), 'psi_b_deg': float(psi_b),
+                    'dpsi_deg': float(dpsi),
+                })
+
+    viol_dpsi = [v['dpsi_deg'] for v in violations]
+    stats = {
+        'n_rays': n_rays,
+        'n_rays_checked': n_rays_checked,
+        'n_rays_with_violation': len(set(v['ray_index'] for v in violations)),
+        'n_pairs_checked': n_pairs_checked,
+        'n_violations': len(violations),
+        'worst_dt': min((v['dt'] for v in violations), default=0.0),
+        'dpsi_violations_min': min(viol_dpsi, default=None),
+        'dpsi_violations_max': max(viol_dpsi, default=None),
+        'dpsi_violations_mean': (sum(viol_dpsi) / len(viol_dpsi)) if viol_dpsi else None,
+        'dpsi_all_mean': (sum(dpsi_all) / len(dpsi_all)) if dpsi_all else None,
+    }
+    theta_histogram = {}
+    if violations:
+        for v in violations:
+            th = v['theta_j_deg']
+            bin_start = float(int(th // BIN_SIZE_DEG) * BIN_SIZE_DEG)
+            bin_key = f"{bin_start:.1f}_to_{bin_start + BIN_SIZE_DEG:.1f}_deg"
+            theta_histogram[bin_key] = theta_histogram.get(bin_key, 0) + 1
+
+    # 3. Top 10 worst time inversions (most negative dt)
+    top_by_dt = sorted(violations, key=lambda v: v['dt'])[:TOP_N]
+
+    # 4. Top 10 largest launch angle discontinuities
+    top_by_dpsi = sorted(violations, key=lambda v: v['dpsi_deg'], reverse=True)[:TOP_N]
+
+    return stats, theta_histogram, top_by_dt, top_by_dpsi
+
+""" End of check_ray_monotonicity """

@@ -1,6 +1,7 @@
 from tkinter import *
 #from tkinter import Button, Label, Entry
 import tkinter.filedialog as fd
+import functools
 
 #import tkinter as tk
 #import tkinter.ttk as ttk    # shown in docs, but apparently not equired by tkinter-tooltip
@@ -29,6 +30,7 @@ import main as m
 import rocket_data as rd
 import balmis as bm
 #import tables_v2b as tb
+import tables_v2b_a as tb_con
 import short_search as ss
 import footprintv2 as fp
 #import chart3d_window as c3
@@ -4023,6 +4025,235 @@ def run_multi_missile_footprint() : # actual routine, for window shell see gui_m
 """ END of run_multi_missile_footprint """
 
 
+def run_ray_monotonicity_check() :
+    """
+    Diagnostic, not a footprint calculation: for every interceptor type,
+    load/build its concentric (angle-outer) table and walk every ray from
+    its lowest row ("underground", radius closest to R_e) up to its highest
+    ("maximum altitude"), checking that time keeps increasing -- i.e.
+    further along the beam is always later in time.
+
+    A violation is exactly the mechanism behind "phantom" interception
+    points: interception_table() picks, independently for each radius
+    bucket along a ray, whichever raw trajectory (out of the whole
+    psi_launch fan) reaches that bucket earliest. Two neighbouring buckets
+    can end up won by two very different psi_launch trajectories (one
+    depressed, one lofted); short_search then linearly interpolates between
+    those two rows for any missile hit that lands between them, blending
+    fragments of two unrelated flights into a point that satisfies the
+    table's arithmetic but doesn't correspond to any real interceptor path.
+
+    A table can have millions of these, almost all of them sub-second noise
+    near theta=0 from many near-horizontal trajectories grazing the ILP
+    within milliseconds of each other -- so this only saves a histogram (by
+    theta) plus the worst few hundred by |dt| and by dpsi_deg per
+    interceptor, not every single violation. This only detects and reports;
+    the fix (psi_gate_deg) lives in short_search, see
+    run_phantom_point_fix_compare / gui_phantom_point_fix_compare.
+    """
+    interceptor_data_list = rd.load_s_idata(rd_fname)
+
+    if set_time_stamp_var.get() :
+        r_now = datetime.now()
+        t_stamp = "-" + r_now.strftime("%y%m%d-%H%M")
+    else :
+        t_stamp = ''
+
+    print("\nRay monotonicity check started ({} interceptor type(s))...".format(len(interceptor_data_list)))
+
+    all_results = {}
+    total_violations = 0
+    total_rays_with_violation = 0
+    total_rays_checked = 0
+    failed = []
+
+    for i_data in interceptor_data_list :
+        i_key = i_data['i_key']
+        i_name = i_data['type']
+        print("  i{} ({}) ...".format(i_key, i_name), end='')
+
+        try :
+            int_table_con = m.load_int_table(i_key, fcc_constants.psi_step, alfa_step,
+                                             rd_fname, t_stamp, set_keep_int_tables_var.get(),
+                                             concentric=True)
+        except Exception as exc :
+            print(" FAILED to load/build table: {}".format(exc))
+            failed.append({'i_key': i_key, 'name': i_name, 'error': str(exc)})
+            continue
+
+        stats, theta_histogram, top_by_dt, top_by_dpsi = tb_con.check_ray_monotonicity(int_table_con)
+        all_results[str(i_key)] = {
+            'name': i_name, 'stats': stats,
+            'theta_histogram': {str(k): v for k, v in sorted(theta_histogram.items())},
+            'top_violations_by_dt': top_by_dt,
+            'top_violations_by_dpsi': top_by_dpsi,
+        }
+        total_violations += stats['n_violations']
+        total_rays_with_violation += stats['n_rays_with_violation']
+        total_rays_checked += stats['n_rays_checked']
+
+        print(" {} violation(s) across {}/{} rays checked (worst dt={:.2f}s)".format(
+            stats['n_violations'], stats['n_rays_with_violation'], stats['n_rays_checked'], stats['worst_dt']))
+
+    file_name = 'ray_monotonicity_check{}.json'.format(t_stamp)
+    if set_keep_stdout_file_var.get() :
+        m.keep_old_file(file_name)
+    with open(file_name, 'w') as f :
+        json.dump({'per_interceptor': all_results, 'failed_to_load': failed}, f, indent=2)
+
+    summary = ("Ray monotonicity check complete.\n"
+               "{} interceptor type(s) checked, {} failed to load.\n"
+               "{} violation(s) across {} of {} rays checked.\n"
+               "Details saved to {}").format(
+        len(interceptor_data_list), len(failed),
+        total_violations, total_rays_with_violation, total_rays_checked,
+        file_name)
+
+    print("\n" + summary)
+    pop_message("Ray monotonicity check", summary)
+
+""" END of run_ray_monotonicity_check """
+
+
+def run_phantom_point_fix_compare() :
+    """
+    Runs the current mode2 footprint (for the selected missile/interceptor)
+    three ways and plots all three together:
+      1. Angle-Elevation -- classic beta-table search, unaffected either way
+      2. Concentric, original -- short_search's current, unguarded behaviour
+      3. Concentric, fixed -- same table, but short_search refuses to
+         interpolate between two ray rows whose source psi_launch
+         trajectories are more than one psi_step apart (psi_gate_deg), so a
+         hit can no longer be a blend of two unrelated trajectories (see
+         short_search's psi_gate_deg docstring, and
+         run_ray_monotonicity_check for the diagnostic that motivated this)
+
+    Same setup as gui_footprint's mode2/compare branch, just always
+    computing the third (fixed) variant too via a functools.partial-bound
+    s_func -- footprint_mode2 itself is untouched.
+    """
+    m_type = mtype_var.get()
+    i_type = itype_var.get()
+    emode_sls = emode_var.get()
+    num_steps_mode2 = num_steps_mode2_var.get()
+    acc = acc_var.get()
+    h_int_min = mia_var.get()
+    h_discr = h_discr_var.get()
+    t_delay = t_delay_var.get()
+    plot_hit_charts = plot_hit_charts_var.get()
+    hit_chart_angle = hit_chart_angle_var.get()
+
+    if set_time_stamp_var.get() :
+        r_now = datetime.now()
+        t_stamp = "-" + r_now.strftime("%y%m%d-%H%M")
+    else :
+        t_stamp = ''
+
+    print("\nPhantom-point fix comparison started. Missile type m{}, Interceptor type i{}".format(m_type, i_type))
+    print("Missile type m{} trajectory calculating...".format(m_type))
+
+    missile_data = rd.missile(m_type, rd_fname)
+    trj = bm.balmisflight(missile_data)
+    mrange = trj[len(trj) - 1, 2] * R_e
+    print("\rMissile type m{} trajectory calculated, missile range={:.0f} km".format(m_type, mrange/1000))
+
+    if mrange > bm_range_limit :
+        print("STOP: Missile range is too long for footprint calculation. The limit is {} km".format(bm_range_limit/1000))
+        return False
+
+    n_stages = len(missile_data["t_bu"])
+    burn_time = sum(missile_data["t_bu"]) + sum(missile_data["t_delay"]) - missile_data["t_delay"][n_stages - 1]
+    t_int_lnc = burn_time + t_delay
+
+    det_range = 0.0
+    interceptor_data = rd.interceptor(i_type, rd_fname)
+    if "det_range" in interceptor_data.keys() :
+        if len(interceptor_data["det_range"]) > m_type :
+            det_range = interceptor_data["det_range"][m_type]
+        else :
+            print("No detection range value found for this missile. Detection range is set to 0.")
+    else :
+        print("No detection range values set in the interceptor data. Detection range set to 0.")
+
+    if det_range < 11000 :
+        det_range *= 1000
+    if h_discr < 1000 :
+        h_discr *= 1000
+    if h_int_min < 500 :
+        h_int_min *= 1000
+
+    mpia = interceptor_data['mpia']
+    mpia *= 1000
+    h_int_min = max(h_int_min, mpia)
+
+    maxia = interceptor_data['maxia']
+    maxia *= 1000
+
+    fp_st = time.time()
+
+    op_range = interceptor_data['op_range']
+    if op_range < 2000 :
+        op_range *= 1000
+    if op_range :
+        print(">Interceptor's operational range {:.0f} km".format(op_range/1000))
+    else :
+        print(">Interceptor's operational range is not set.")
+
+    int_table = m.load_int_table(i_type, fcc_constants.psi_step, beta_step, rd_fname, t_stamp, set_keep_int_tables_var.get(), concentric=False)
+    int_table_con = m.load_int_table(i_type, fcc_constants.psi_step, alfa_step, rd_fname, t_stamp, set_keep_int_tables_var.get(), concentric=True)
+
+    if emode_sls :
+        search_func_m2 = ss.sls_search2
+        search_type = "Shoot_Look_Shoot"
+        save_label = "sls"
+    else :
+        search_func_m2 = ss.short_search2
+        search_type = "Shoot_Once"
+        save_label = "son"
+
+    print("Type of interception: " + search_type)
+
+    psi_gate_deg = fcc_constants.psi_step * 1.01
+    search_func_m2_fixed = functools.partial(search_func_m2, psi_gate_deg=psi_gate_deg)
+
+    print("\nOriginal + concentric (unguarded) ...")
+    footprint_results = ss.footprint_mode2(search_func_m2, trj, int_table, h_int_min, maxia, t_int_lnc,
+                                           angle_step_mode2, op_range, det_range, t_delay, h_discr,
+                                           acc, num_steps_mode2, plot_hit_charts, hit_chart_angle,
+                                           m_type, i_type, t_itable_con=int_table_con)
+    footprint_tab_classic = footprint_results[0]
+    footprint_tab_con_orig = footprint_results[1]
+
+    print("\nConcentric (psi_gate_deg={:.3f}, phantom) ...".format(psi_gate_deg))
+    footprint_results_fixed = ss.footprint_mode2(search_func_m2_fixed, trj, int_table, h_int_min, maxia, t_int_lnc,
+                                                  angle_step_mode2, op_range, det_range, t_delay, h_discr,
+                                                  acc, num_steps_mode2, plot_hit_charts, hit_chart_angle,
+                                                  m_type, i_type, t_itable_con=int_table_con)
+    footprint_tab_con_fixed = footprint_results_fixed[1]
+
+    header_str = ("Mode2 phantom-fix compare: omega, shift, acc_prm, x, y, m_type={} i_type={} "
+                  "min_ia={} maxia={} t_int_lnc={} num_steps2={} det_range={} km t_delay={} "
+                  "h_discr={} psi_gate_deg={:.3f} {}").format(
+        m_type, i_type, h_int_min/1000, maxia/1000, t_int_lnc, num_steps_mode2,
+        det_range/1000, t_delay, h_discr/1000, psi_gate_deg, search_type)
+    chart_info_str = "min_ia={} maxia={} t_int_lnc={} num_steps2={} psi_gate_deg={:.3f} {}".format(
+        h_int_min/1000, maxia/1000, t_int_lnc, num_steps_mode2, psi_gate_deg, search_type)
+
+    title_str = "Phantom-Point Fix Compare: i_type={} m_type={} mrange={:.0f} km".format(i_type, m_type, mrange/1000)
+
+    data_fname = footprint_path + "/footprint_mode2_m{}_i{}_{}_phantomfix{}.json".format(m_type, i_type, save_label, t_stamp)
+    chart_fname = footprint_path + "/footprint_mode2_m{}_i{}_{}_phantomfix{}.png".format(m_type, i_type, save_label, t_stamp)
+
+    label_arr = ['Angle-Elevation', 'Concentric (original)', 'Concentric (phantom)']
+    plots_to_render = [footprint_tab_classic, footprint_tab_con_orig, footprint_tab_con_fixed]
+    gui_fpchart_n(plots_to_render, label_arr, chart_info_str, title_str, chart_fname, header_str, mrange, data_fname, True, False)
+
+    fp_et = time.time()
+    print("\nPhantom-point fix comparison time = {:.3f}s".format(fp_et - fp_st))
+
+""" END of run_phantom_point_fix_compare """
+
+
 def gui_multi_missile_footprint() : # routine's window shell, for actual routine see run_multi_missile_footprint
     global mumi_fprint_win
     try :
@@ -5889,7 +6120,21 @@ if __name__ == '__main__':
     if show_extra_procs_var.get() :
         btn_interc_traj_set.grid(column=0, row=4, sticky='ew')
         btn_interc_table.grid(column=0, row=5, sticky='ew')
-        
+
+    frame_pp = LabelFrame(frame_col2, padx=5, pady=5, text="Phantom Points") #padding inside frame
+    frame_pp.grid(column=0, row=3, sticky='ew', padx=10, pady=10) # padding outside frame
+    frame_pp.columnconfigure(0, weight=1)
+
+    btn_ray_monotonicity = Button(frame_pp, text='Check Interceptor Ray Monotonicity', command=lambda: call_longrun(run_ray_monotonicity_check))
+    btn_phantom_fix_compare = Button(frame_pp, text='Compare Phantom-Point Fix', command=lambda: call_longrun(run_phantom_point_fix_compare))
+
+    if tooltips:
+        ToolTip(btn_ray_monotonicity, msg="For every interceptor type, check the concentric table for\n\"phantom\" interception points (rays where a later point is\nan earlier time -- a sign two different trajectories got\nstitched together). Diagnostic only, can take a while.", delay=1.0)
+        ToolTip(btn_phantom_fix_compare, msg="Runs the current missile/interceptor's mode2 footprint three ways\n(Angle-Elevation, Concentric original, Concentric with the\npsi_gate_deg phantom-point fix) and plots all three for comparison.", delay=1.0)
+
+    btn_ray_monotonicity.grid(column=0, row=0, sticky='ew')
+    btn_phantom_fix_compare.grid(column=0, row=1, sticky='ew')
+
     #rc_menu_string ='copy-paste-cut'
     #root.bind(right_click, lambda event, arg=rc_menu_string : show_rc_menu(event, arg))
     
