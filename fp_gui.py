@@ -2344,7 +2344,7 @@ def gui_footprint() :
     print("Type of interception: " + search_type)
 
     if not mode2 :
-        # 1. angle-elevation
+        # 1. ILP-centered
         footprint_tab = fp.footprint_calc_v2(search_func, trj, int_table, h_int_min, maxia, t_int_lnc, angle_step, op_range, det_range, t_delay, h_discr, acc, dist, plot_hit_charts, hit_chart_angle, m_type, i_type, concentric = False)
         
         # 2. concentric footprint
@@ -2401,7 +2401,7 @@ def gui_footprint() :
 
     if has_data :
         if compare:
-            label_arr = ['Angle-Elevation', 'Concentric']
+            label_arr = ['ILP-centered', 'Concentric']
             bw = False 
             save_label += "_compare"
         else:
@@ -4045,7 +4045,7 @@ def run_ray_monotonicity_check() :
 
     A table can have millions of these, almost all of them sub-second noise
     near theta=0 from many near-horizontal trajectories grazing the ILP
-    within milliseconds of each other -- so this only saves a histogram (by
+    within milliseconds of each other - so this only saves a histogram (by
     theta) plus the worst few hundred by |dt| and by dpsi_deg per
     interceptor, not every single violation. This only detects and reports;
     the fix (psi_gate_deg) lives in short_search, see
@@ -4119,7 +4119,7 @@ def run_phantom_point_fix_compare() :
     """
     Runs the current mode2 footprint (for the selected missile/interceptor)
     three ways and plots all three together:
-      1. Angle-Elevation -- classic beta-table search, unaffected either way
+      1. ILP-centered -- classic beta-table search, unaffected either way
       2. Concentric, original -- short_search's current, unguarded behaviour
       3. Concentric, fixed -- same table, but short_search refuses to
          interpolate between two ray rows whose source psi_launch
@@ -4244,7 +4244,7 @@ def run_phantom_point_fix_compare() :
     data_fname = footprint_path + "/footprint_mode2_m{}_i{}_{}_phantomfix{}.json".format(m_type, i_type, save_label, t_stamp)
     chart_fname = footprint_path + "/footprint_mode2_m{}_i{}_{}_phantomfix{}.png".format(m_type, i_type, save_label, t_stamp)
 
-    label_arr = ['Angle-Elevation', 'Concentric (original)', 'Concentric (phantom)']
+    label_arr = ['ILP-centered', 'Concentric (original)', 'Concentric (phantom)']
     plots_to_render = [footprint_tab_classic, footprint_tab_con_orig, footprint_tab_con_fixed]
     gui_fpchart_n(plots_to_render, label_arr, chart_info_str, title_str, chart_fname, header_str, mrange, data_fname, True, False)
 
@@ -4656,11 +4656,11 @@ def run_probing() :
         m.keep_old_file(chart_fname)
         
     lbl_scatter = "probe"
-    lbl_curve = "Angle-Elevation"
+    lbl_curve = "ILP-centered"
     
     if mode2 and compare:
         curves_to_plot = [fp_tab, fp_tab_con]
-        labels_to_plot = ["Angle-Elevation", "Concentric"]
+        labels_to_plot = ["ILP-centered", "Concentric"]
         sector_chart = gui_probing_chart([fp_scatter], curves_to_plot, [lbl_scatter], labels_to_plot, chart_info_str, title_str, chart_fname)
     else:
         sector_chart = gui_probing_chart([fp_scatter], [fp_tab], [lbl_scatter], [lbl_curve], chart_info_str, title_str, chart_fname)
@@ -5032,7 +5032,7 @@ def gui_interceptor_table() :
     print("Compare Mode =", fp_compare_var.get())
 
     if fp_compare_var.get() == True:
-        print("\n Starting Angle-Elevation Interceptor Table Calculation (Compare Mode)")
+        print("\n Starting ILP-centered Interceptor Table Calculation (Compare Mode)")
         # anlge-elevation calculation of table
         m.run_interceptor_table(i_key, rd_fname, fcc_constants.psi_step, set_keep_int_tables_var.get(), concentric=False)
         
@@ -5060,7 +5060,7 @@ def gui_interception_table() :
     print("Compare Mode =", fp_compare_var.get())
 
     if fp_compare_var.get() == True:
-        print("\n Starting Angle-Elevation Table Calculation (Compare Mode)")
+        print("\n Starting ILP-centered Table Calculation (Compare Mode)")
         # anlge-elevation calculation of table
         #m.run_interceptor_table(i_key, rd_fname, fcc_constants.psi_step, set_keep_int_tables_var.get(), concentric=False)
         m.run_interception_table(i_key, rd_fname, fcc_constants.psi_step, beta_step, set_keep_int_tables_var.get(), set_int_table_samp_verify_var.get(), concentric=False)
@@ -6130,7 +6130,7 @@ if __name__ == '__main__':
 
     if tooltips:
         ToolTip(btn_ray_monotonicity, msg="For every interceptor type, check the concentric table for\n\"phantom\" interception points (rays where a later point is\nan earlier time -- a sign two different trajectories got\nstitched together). Diagnostic only, can take a while.", delay=1.0)
-        ToolTip(btn_phantom_fix_compare, msg="Runs the current missile/interceptor's mode2 footprint three ways\n(Angle-Elevation, Concentric original, Concentric with the\npsi_gate_deg phantom-point fix) and plots all three for comparison.", delay=1.0)
+        ToolTip(btn_phantom_fix_compare, msg="Runs the current missile/interceptor's mode2 footprint three ways\n(ILP-centered, Concentric original, Concentric with the\npsi_gate_deg phantom-point fix) and plots all three for comparison.", delay=1.0)
 
     btn_ray_monotonicity.grid(column=0, row=0, sticky='ew')
     btn_phantom_fix_compare.grid(column=0, row=1, sticky='ew')

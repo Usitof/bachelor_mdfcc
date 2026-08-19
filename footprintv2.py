@@ -840,7 +840,7 @@ def plot_hit(hit_info,
     else :
         tar_trj = bm.trj_shift_turn(trj_0, R_e, dist, radians(d_angle)) # in mode2: dist_opt is shift, fi_opt is omega
     #hit = [psi_hit, t_hit_i, r_hit, beta_hit, psi1, i1t, r1, psi2, i2t, r2], [t_hit_m, r_hit, beta_hit, r_hit * cos(beta_hit), r_hit * sin(beta_hit)]
-    # 1. data for angle-elevation shell (tb)
+    # 1. data for ILP-centered shell (tb)
     mis_traj = tb.mis_traj_sample(tar_trj)
     
     mtime = mis_traj[:, 0]

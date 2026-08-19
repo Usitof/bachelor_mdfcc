@@ -433,6 +433,11 @@ def check_ray_monotonicity(int_table_con):
 
             n_pairs_checked += 1
             dpsi = abs(psi_b - psi_a)
+
+            if dpsi <= fcc_constants.psi_step:
+                continue  # does not count the interception between two nearest 
+                          # rays as a violation
+
             dpsi_all.append(dpsi)
 
             if t_b < t_a:
