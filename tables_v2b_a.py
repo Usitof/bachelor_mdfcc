@@ -435,7 +435,7 @@ def check_ray_monotonicity(int_table_con):
             dpsi = abs(psi_b - psi_a)
 
             if dpsi <= fcc_constants.psi_step:
-                continue  # does not count the interception between two nearest 
+                continue  # does not count the interpolation between two nearest 
                           # rays as a violation
 
             dpsi_all.append(dpsi)
