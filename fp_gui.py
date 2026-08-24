@@ -29,7 +29,7 @@ from math import degrees, radians, ceil, sin, cos
 import main as m
 import rocket_data as rd
 import balmis as bm
-#import tables_v2b as tb
+import tables_v2b_0 as tb
 import tables_v2b_a as tb_con
 import short_search as ss
 import footprintv2 as fp
@@ -4053,61 +4053,114 @@ def run_ray_monotonicity_check() :
     """
     interceptor_data_list = rd.load_s_idata(rd_fname)
 
-    if set_time_stamp_var.get() :
+    if set_time_stamp_var.get():
         r_now = datetime.now()
         t_stamp = "-" + r_now.strftime("%y%m%d-%H%M")
-    else :
+    else:
         t_stamp = ''
 
     print("\nRay monotonicity check started ({} interceptor type(s))...".format(len(interceptor_data_list)))
 
     all_results = {}
-    total_violations = 0
-    total_rays_with_violation = 0
-    total_rays_checked = 0
+    total_violations_con = 0
+    total_rays_with_violation_con = 0
+    total_rays_checked_con = 0
+    total_violations_non_con = 0
+    total_rays_with_violation_non_con = 0
+    total_rays_checked_non_con = 0
     failed = []
 
-    for i_data in interceptor_data_list :
+    for i_data in interceptor_data_list:
         i_key = i_data['i_key']
         i_name = i_data['type']
         print("  i{} ({}) ...".format(i_key, i_name), end='')
 
-        try :
-            int_table_con = m.load_int_table(i_key, fcc_constants.psi_step, alfa_step,
-                                             rd_fname, t_stamp, set_keep_int_tables_var.get(),
-                                             concentric=True)
-        except Exception as exc :
+        try:
+            # Load/build concentric table
+            int_table_con = m.load_int_table(
+                i_key, fcc_constants.psi_step, alfa_step, rd_fname, t_stamp,
+                set_keep_int_tables_var.get(), concentric=True
+            )
+            # Load/build non-concentric table
+            int_table = m.load_int_table(
+                i_key, fcc_constants.psi_step, alfa_step, rd_fname, t_stamp,
+                set_keep_int_tables_var.get(), concentric=False
+            )
+        except Exception as exc:
             print(" FAILED to load/build table: {}".format(exc))
             failed.append({'i_key': i_key, 'name': i_name, 'error': str(exc)})
             continue
 
-        stats, theta_histogram, top_by_dt, top_by_dpsi = tb_con.check_ray_monotonicity(int_table_con)
+        # --- Check concentric table ---
+        violations_con, stats_con, theta_histogram_con, top_by_dt_con, top_by_dpsi_con = tb_con.check_ray_monotonicity(int_table_con)
+        total_violations_con += stats_con['n_violations']
+        total_rays_with_violation_con += stats_con['n_rays_with_violation']
+        total_rays_checked_con += stats_con['n_rays_checked']
+
+        # --- Check non-concentric table ---
+        violations_non_con, stats_non_con, theta_histogram_non_con, top_by_dt_non_con, top_by_dpsi_non_con = tb.check_ray_monotonicity(int_table)
+        total_violations_non_con += stats_non_con['n_violations']
+        total_rays_with_violation_non_con += stats_non_con['n_rays_with_violation']
+        total_rays_checked_non_con += stats_non_con['n_rays_checked']
+
+        # Store results for this interceptor
         all_results[str(i_key)] = {
-            'name': i_name, 'stats': stats,
-            'theta_histogram': {str(k): v for k, v in sorted(theta_histogram.items())},
-            'top_violations_by_dt': top_by_dt,
-            'top_violations_by_dpsi': top_by_dpsi,
+            'name': i_name,
+            'concentric': {
+                'stats': stats_con,
+                'theta_histogram': {str(k): v for k, v in sorted(theta_histogram_con.items())},
+                'top_violations_by_dt': top_by_dt_con,
+                'top_violations_by_dpsi': top_by_dpsi_con,
+            },
+            'non_concentric': {
+                'stats': stats_non_con,
+                'theta_histogram': {str(k): v for k, v in sorted(theta_histogram_non_con.items())},
+                'top_violations_by_dt': top_by_dt_non_con,
+                'top_violations_by_dpsi': top_by_dpsi_non_con,
+            },
         }
-        total_violations += stats['n_violations']
-        total_rays_with_violation += stats['n_rays_with_violation']
-        total_rays_checked += stats['n_rays_checked']
 
-        print(" {} violation(s) across {}/{} rays checked (worst dt={:.2f}s)".format(
-            stats['n_violations'], stats['n_rays_with_violation'], stats['n_rays_checked'], stats['worst_dt']))
+        print(" Concentric: {} violation(s) across {}/{} rays (worst dt={:.2f}s) | "
+              "Non-concentric: {} violation(s) across {}/{} rays (worst dt={:.2f}s)".format(
+                  stats_con['n_violations'], stats_con['n_rays_with_violation'], stats_con['n_rays_checked'], stats_con['worst_dt'],
+                  stats_non_con['n_violations'], stats_non_con['n_rays_with_violation'], stats_non_con['n_rays_checked'], stats_non_con['worst_dt']
+              ))
 
+    # Save results to JSON
     file_name = 'ray_monotonicity_check{}.json'.format(t_stamp)
-    if set_keep_stdout_file_var.get() :
+    if set_keep_stdout_file_var.get():
         m.keep_old_file(file_name)
-    with open(file_name, 'w') as f :
-        json.dump({'per_interceptor': all_results, 'failed_to_load': failed}, f, indent=2)
+    with open(file_name, 'w') as f:
+        json.dump({
+            'per_interceptor': all_results,
+            'failed_to_load': failed,
+            'summary': {
+                'concentric': {
+                    'total_violations': total_violations_con,
+                    'total_rays_with_violation': total_rays_with_violation_con,
+                    'total_rays_checked': total_rays_checked_con,
+                },
+                'non_concentric': {
+                    'total_violations': total_violations_non_con,
+                    'total_rays_with_violation': total_rays_with_violation_non_con,
+                    'total_rays_checked': total_rays_checked_non_con,
+                },
+            }
+        }, f, indent=2)
 
-    summary = ("Ray monotonicity check complete.\n"
-               "{} interceptor type(s) checked, {} failed to load.\n"
-               "{} violation(s) across {} of {} rays checked.\n"
-               "Details saved to {}").format(
+    # Summary message
+    summary = (
+        "Ray monotonicity check complete.\n"
+        "{} interceptor type(s) checked, {} failed to load.\n"
+        "Concentric: {} violation(s) across {} of {} rays checked.\n"
+        "Non-concentric: {} violation(s) across {} of {} rays checked.\n"
+        "Details saved to {}"
+    ).format(
         len(interceptor_data_list), len(failed),
-        total_violations, total_rays_with_violation, total_rays_checked,
-        file_name)
+        total_violations_con, total_rays_with_violation_con, total_rays_checked_con,
+        total_violations_non_con, total_rays_with_violation_non_con, total_rays_checked_non_con,
+        file_name
+    )
 
     print("\n" + summary)
     pop_message("Ray monotonicity check", summary)
@@ -4121,12 +4174,13 @@ def run_phantom_point_fix_compare() :
     three ways and plots all three together:
       1. ILP-centered -- classic beta-table search, unaffected either way
       2. Concentric, original -- short_search's current, unguarded behaviour
-      3. Concentric, fixed -- same table, but short_search refuses to
+      3. ILP-centred, phantom -- same table, but short_search refuses to
          interpolate between two ray rows whose source psi_launch
          trajectories are more than one psi_step apart (psi_gate_deg), so a
          hit can no longer be a blend of two unrelated trajectories (see
          short_search's psi_gate_deg docstring, and
          run_ray_monotonicity_check for the diagnostic that motivated this)
+      4. Concentric, phantom -- ""
 
     Same setup as gui_footprint's mode2/compare branch, just always
     computing the third (fixed) variant too via a functools.partial-bound
@@ -4229,6 +4283,7 @@ def run_phantom_point_fix_compare() :
                                                   angle_step_mode2, op_range, det_range, t_delay, h_discr,
                                                   acc, num_steps_mode2, plot_hit_charts, hit_chart_angle,
                                                   m_type, i_type, t_itable_con=int_table_con)
+    footprint_tab_fixed = footprint_results_fixed[0]
     footprint_tab_con_fixed = footprint_results_fixed[1]
 
     header_str = ("Mode2 phantom-fix compare: omega, shift, acc_prm, x, y, m_type={} i_type={} "
@@ -4244,8 +4299,8 @@ def run_phantom_point_fix_compare() :
     data_fname = footprint_path + "/footprint_mode2_m{}_i{}_{}_phantomfix{}.json".format(m_type, i_type, save_label, t_stamp)
     chart_fname = footprint_path + "/footprint_mode2_m{}_i{}_{}_phantomfix{}.png".format(m_type, i_type, save_label, t_stamp)
 
-    label_arr = ['ILP-centered', 'Concentric (original)', 'Concentric (phantom)']
-    plots_to_render = [footprint_tab_classic, footprint_tab_con_orig, footprint_tab_con_fixed]
+    label_arr = ['ILP-centered', 'Concentric', 'ILP-centered (phantom)', 'Concentric (phantom)']
+    plots_to_render = [footprint_tab_classic, footprint_tab_con_orig, footprint_tab_fixed, footprint_tab_con_fixed]
     gui_fpchart_n(plots_to_render, label_arr, chart_info_str, title_str, chart_fname, header_str, mrange, data_fname, True, False)
 
     fp_et = time.time()
@@ -5974,7 +6029,7 @@ if __name__ == '__main__':
     
     lbl_fp_calc_mode = Label(frame_fc, text="Footprint Calculation Mode")
     lbl_eng_mode = Label(frame_fc, text="Type of Interception")
-    lbl_compare = Label(frame_fc, text="Concentric Shell vs. Elevation-Angle Shell")
+    lbl_compare = Label(frame_fc, text="Concentric Shell vs. ILP-Centered Shell")
     lbl_ang_step = Label(frame_fc, text="Mode 1 Footprint angle step, degrees")
     lbl_num_steps_mode2 = Label(frame_fc, text="Mode 2 Footprint number of steps")
     #lbl_ang_step_mode2 = Label(frame_fc, text="Mode 2 Footprint Angle Step, degrees")

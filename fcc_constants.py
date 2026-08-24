@@ -57,7 +57,7 @@ out_time_freq = 2 # every 2 seconds
 
 check_fpa = False # check interceptor's flight path angle, for debug
 
-version = "0.608.03c"
+version = "0.608.24c"
 cfg_fname_old = "footprint_config.json"
 cfg_fname = "fcc_config.json"
 rd_fname = "rocket_data.json"

@@ -106,7 +106,7 @@ def interceptor_table(interc_data, ind_flight_dataprint=False, psi_step=0.25):
     # max_psi = 120 covers both positive and negative flight path angles
     # (flight_path_angle = 90° - psi).  For psi > 90°, the interceptor
     # is launched downwards – necessary to reach points behind the ILP.
-    max_psi = 180   # increase to 180 if even flatter trajectories are needed
+    max_psi = 90 
     psi_n   = int(max_psi / psi_step)
 
     worker_args = [(interc_data.copy(), psi_step, j) for j in range(psi_n)]
@@ -138,13 +138,9 @@ def interception_table(interceptor_data, int_table_v1,
 
     For each ray theta_j: collect ALL trajectory points from ALL fan trajectories
     whose alfa (geocentric angle) equals theta_j (via interpolation).
-    Then apply Pareto-front (time↑, rv↑) and backward-sweep monotonicity enforcement.
 
     Output columns per ray:  [psi_deg, time, rv_m, theta_j_rad]
     """
-    # =========================================================================
-    # MULTI-PACK UNWRAPPING GATEWAY (Sichert Form (122,) statt (3,))
-    # =========================================================================
     if int_table_v1 is not None and hasattr(int_table_v1, "__len__") and len(int_table_v1) == 3:
         if isinstance(int_table_v1, (list, np.ndarray)) and not isinstance(int_table_v1, dict):
             int_table_v1 = int_table_v1[2]
@@ -158,7 +154,7 @@ def interception_table(interceptor_data, int_table_v1,
     all_alfa  = np.concatenate([t[:, 3] for t in valid])
     theta_min = float(np.min(all_alfa))
     theta_max = float(np.max(all_alfa))
-    print("minallalfa ", degrees(theta_min), " maxallalfa ", degrees(theta_max))
+    print("minalltheta ", degrees(theta_min), " maxalltheta ", degrees(theta_max))
 
     theta_step_rad = radians(theta_step_deg)
     theta_grid     = np.arange(theta_min, theta_max + 1e-9, theta_step_rad)
@@ -376,9 +372,10 @@ def check_ray_monotonicity(int_table_con):
 
     This function does not try to fix that -- it just walks each ray from
     its lowest row ("underground", rv closest to R_e) to its highest
-    ("maximum altitude") and flags every place where the basic physical
-    requirement -- further along the beam must mean later in time -- is
-    violated, i.e. time step to the next row is negative.
+    ("maximum altitude") and flags every place where the
+    requirement -- dpsi is bigger than the psi_step -- is
+    violated, i.e. interpolation not only happening between two nearest 
+    rays.
 
     Parameters
     ----------
@@ -402,13 +399,13 @@ def check_ray_monotonicity(int_table_con):
         dpsi_all_mean (the same, over every pair, violating or not) to see
         whether violations really do concentrate at large psi_launch jumps.
     top_by_dt : list of dict
-        Top 10 violations with the worst (most negative) dt values.
+        Top 3 violations with the worst (most negative) dt values.
     top_by_dpsi : list of dict
-        Top 10 violations with the largest dpsi_deg jumps.
+        Top 3 violations with the largest dpsi_deg jumps.
     """
 
-    BIN_SIZE_DEG = 10.0
-    TOP_N = 10
+    BIN_SIZE_DEG = 1.0
+    TOP_N = 3
 
     violations = []
     n_rays = len(int_table_con)
@@ -434,13 +431,9 @@ def check_ray_monotonicity(int_table_con):
             n_pairs_checked += 1
             dpsi = abs(psi_b - psi_a)
 
-            if dpsi <= fcc_constants.psi_step:
-                continue  # does not count the interpolation between two nearest 
-                          # rays as a violation
-
             dpsi_all.append(dpsi)
 
-            if t_b < t_a:
+            if dpsi > fcc_constants.psi_step:
                 violations.append({
                     'ray_index': k,
                     'theta_j_deg': degrees(theta_j),
@@ -471,6 +464,7 @@ def check_ray_monotonicity(int_table_con):
             bin_start = float(int(th // BIN_SIZE_DEG) * BIN_SIZE_DEG)
             bin_key = f"{bin_start:.1f}_to_{bin_start + BIN_SIZE_DEG:.1f}_deg"
             theta_histogram[bin_key] = theta_histogram.get(bin_key, 0) + 1
+    plot_violation_histogram(violations)
 
     # 3. Top 10 worst time inversions (most negative dt)
     top_by_dt = sorted(violations, key=lambda v: v['dt'])[:TOP_N]
@@ -478,6 +472,57 @@ def check_ray_monotonicity(int_table_con):
     # 4. Top 10 largest launch angle discontinuities
     top_by_dpsi = sorted(violations, key=lambda v: v['dpsi_deg'], reverse=True)[:TOP_N]
 
-    return stats, theta_histogram, top_by_dt, top_by_dpsi
+    return violations, stats, theta_histogram, top_by_dt, top_by_dpsi
 
 """ End of check_ray_monotonicity """
+
+import matplotlib.pyplot as plt
+
+def plot_violation_histogram(violations, metric='dpsi'):
+    """
+    Plots a histogram overlaying theta against a violation severity metric.
+    
+    Parameters
+    ----------
+    violations : list of dict
+        The output from check_ray_monotonicity().
+    metric : str, optional
+        'dpsi' to plot the launch angle gap (degrees).
+        'dt' to plot the negative time steps (seconds).
+    """
+    if not violations:
+        print("No violations found to plot!")
+        return
+
+    thetas = [v['theta_j_deg'] for v in violations]
+    
+    if metric == 'dpsi':
+        y_data = [v['dpsi_deg'] for v in violations]
+        y_label = r"Launch Angle Gap $\Delta\psi$ (degrees)"
+        cmap = 'YlOrRd' 
+    elif metric == 'dt':
+        y_data = [v['dt'] for v in violations]
+        y_label = r"Negative Time Step $\Delta t$ (seconds)"
+        cmap = 'magma'  
+    else:
+        raise ValueError("Metric must be either 'dpsi' or 'dt'")
+
+    plt.figure(figsize=(10, 6))
+    
+    counts, xedges, yedges, im = plt.hist2d(
+        thetas, y_data, 
+        bins=[40, 40], 
+        cmap=cmap, 
+        cmin=1 
+    )
+    
+    plt.xlabel(r"Ray Angle $\theta$ (degrees)", fontsize=11)
+    plt.ylabel(y_label, fontsize=11)
+    plt.title("Concentric")
+    
+    cb = plt.colorbar(im)
+    cb.set_label('Number of Violations (Density)', rotation=270, labelpad=15)
+    
+    plt.grid(True, linestyle=':', alpha=0.6)
+    plt.tight_layout()
+    plt.show()

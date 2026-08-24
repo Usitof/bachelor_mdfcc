@@ -215,15 +215,16 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
         Only used to convert the found hit's (omega, shift) into (x, y) km for the
         returned array -- it does not affect reachability.
     psi_gate_deg :
-        concentric-only phantom-point guard. interception_table() picks
-        whichever raw trajectory reaches each (theta, radius) bucket earliest,
-        independently per bucket -- so two neighbouring rows in a ray can come
-        from very different psi_launch trajectories, and interpolating between
-        them (in _ray_time_at_radius) blends unrelated flights into a point
-        matching neither. If set, any interpolation between two rows whose
-        psi_launch differs by more than psi_gate_deg is refused (treated as
-        not reachable) instead of blended. None (default) disables the check,
-        i.e. unchanged original behaviour. Has no effect when concentric=False.
+        phantom-point guard, both search paths. interception_table() (classic
+        and concentric) can end up bracketing a query radius between two rows
+        whose psi_launch (source trajectory) differ a lot -- one depressed,
+        one lofted -- so linearly interpolating between them (concentric:
+        _ray_time_at_radius; classic: the equivalent inline radius-bisection
+        further below) blends two unrelated flights into a point matching
+        neither. If set, any such interpolation between two rows whose psi
+        differs by more than psi_gate_deg is refused (treated as not
+        reachable at that point) instead of blended. None (default) disables
+        the check, i.e. unchanged original behaviour, in both paths.
 
     Returns
     -------
@@ -497,10 +498,19 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
                 
                             psi1 = int_table[i_i_beta][i_hit - 1, 0]
                             psi2 = int_table[i_i_beta][i_hit, 0]
-                            psi_hit = psi1 + (psi2 - psi1) * (m_rad - r1) / (r2 - r1)
-                                
-                            #hit = [psi_hit, t_hit, m_rad, int_table[i_i_beta][1, 3]], mis_traj[i_m_beta]
-                            hit = [psi_hit, t_hit, m_rad, int_table[i_i_beta][1, 3]], mis_traj[i_m_beta], int_table[i_i_beta][i_hit - 1], int_table[i_i_beta][i_hit]
+
+                            if psi_gate_deg is not None and abs(psi1 - psi2) > psi_gate_deg :
+                                # phantom-point guard: the two rows bracketing m_rad come from
+                                # source trajectories too far apart in psi_launch to trust a
+                                # linear blend between them -- treat as no hit at this beta,
+                                # same as short_search's concentric path (see psi_gate_deg
+                                # in the docstring above).
+                                hit = False
+                            else :
+                                psi_hit = psi1 + (psi2 - psi1) * (m_rad - r1) / (r2 - r1)
+
+                                #hit = [psi_hit, t_hit, m_rad, int_table[i_i_beta][1, 3]], mis_traj[i_m_beta]
+                                hit = [psi_hit, t_hit, m_rad, int_table[i_i_beta][1, 3]], mis_traj[i_m_beta], int_table[i_i_beta][i_hit - 1], int_table[i_i_beta][i_hit]
                         
                         elif int_table[i_i_beta][0, 2] == m_rad :
                             #hit = int_table[i_i_beta][0], mis_traj[i_m_beta]
@@ -1235,7 +1245,7 @@ def footprint_mode2(s_func, # s_func muss entweder short_search2 oder sls_search
             )
             beta_min = -max_theta / 2
             int_max_range = max_theta * R_e
-            print("alpha_max={:.2f}, concentric_max_separation={:.1f} km".format(
+            print("theta_max={:.2f}, concentric_max_separation={:.1f} km".format(
                 degrees(max_theta), int_max_range / 1000))
         else:
             beta_min = active_table[0][0, 3] - radians(beta_step)
