@@ -62,6 +62,8 @@ if not os.path.exists(footprint_path) :
     os.makedirs(footprint_path)
 if not os.path.exists(trajectory_path) :
     os.makedirs(trajectory_path)
+if not os.path.exists(phantom_path) :
+    os.makedirs(phantom_path)
 if not os.path.exists(int_table_path) :
     os.makedirs(int_table_path)
 if not os.path.exists(geo_path) :
@@ -1522,28 +1524,19 @@ def gui_mk_poly_data(ftprint_arr, mis_range, data_fname, mode2=False) :
                                         polylist.append([p_i['lon2'], p_i['lat2']])
                                 else :  	# Mod2 Footprint data array
                                     fplen = len(footprint)
-                                    
-                                    if is_concentric_trajectory:
-                                        # concentric: direct orthogonal x/y projection
-                                        for i2 in range(fplen):
-                                            p__i = geo_sphere.Direct(ilat, ilon, iazm, footprint[i2][4] * 1000.0)
-                                            p_i  = geo_sphere.Direct(p__i['lat2'], p__i['lon2'], 90.0 + p__i['azi2'], footprint[i2][3] * 1000.0)
-                                            polylist.append([p_i['lon2'], p_i['lat2']])
-                                    else:
-                                        # non-concentric: polar transformation needed
-                                        shift = footprint[0][1]
-                                        mrange = shift - footprint[0][4] * 1000.0
-                                        for i2 in range(fplen) :
-                                            shift = footprint[i2][1]
-                                            p_i0 = geo_sphere.Direct(ilat, ilon, iazm, shift)
-                                            az_i = p_i0['azi2'] - 180.0 + degrees(footprint[i2][0])
-                                            if footprint[i2][2] == 2 :
-                                                p_i = geo_sphere.Direct(p_i0['lat2'], p_i0['lon2'], az_i, mrange * mrl_factor2)
-                                            elif footprint[i2][2] == 3 :
-                                                p_i = geo_sphere.Direct(p_i0['lat2'], p_i0['lon2'], az_i, mrange * mrl_factor1)
-                                            else :
-                                                p_i = geo_sphere.Direct(p_i0['lat2'], p_i0['lon2'], az_i, mrange)
-                                            polylist.append([p_i['lon2'], p_i['lat2']])
+                                    shift = footprint[0][1]
+                                    mrange = shift - footprint[0][4] * 1000.0
+                                    for i2 in range(fplen) :
+                                        shift = footprint[i2][1]
+                                        p_i0 = geo_sphere.Direct(ilat, ilon, iazm, shift)
+                                        az_i = p_i0['azi2'] - 180.0 + degrees(footprint[i2][0])
+                                        if footprint[i2][2] == 2 :
+                                            p_i = geo_sphere.Direct(p_i0['lat2'], p_i0['lon2'], az_i, mrange * mrl_factor2)
+                                        elif footprint[i2][2] == 3 :
+                                            p_i = geo_sphere.Direct(p_i0['lat2'], p_i0['lon2'], az_i, mrange * mrl_factor1)
+                                        else :
+                                            p_i = geo_sphere.Direct(p_i0['lat2'], p_i0['lon2'], az_i, mrange)
+                                        polylist.append([p_i['lon2'], p_i['lat2']])
 
                                 if is_concentric_trajectory:
                                     fp_color = 'red'
@@ -4059,7 +4052,7 @@ def run_ray_monotonicity_check() :
     else:
         t_stamp = ''
 
-    print("\nRay monotonicity check started ({} interceptor type(s))...".format(len(interceptor_data_list)))
+    print("\nPhantom check started ({} interceptor type(s))...".format(len(interceptor_data_list)))
 
     all_results = {}
     total_violations_con = 0
@@ -4091,14 +4084,29 @@ def run_ray_monotonicity_check() :
             failed.append({'i_key': i_key, 'name': i_name, 'error': str(exc)})
             continue
 
+        plot_phantom_con = phantom_path + f"/phantom_i{i_key}_concentric{t_stamp}.png"
+        plot_phantom_ilp = phantom_path + f"/phantom_i{i_key}_ilp{t_stamp}.png"
+
         # --- Check concentric table ---
-        violations_con, stats_con, theta_histogram_con, top_by_dt_con, top_by_dpsi_con = tb_con.check_ray_monotonicity(int_table_con)
+        violations_con, stats_con, theta_histogram_con, top_by_dt_con, top_by_dpsi_con = tb_con.check_ray_monotonicity(
+        int_table_con,
+        type="concentric",
+        plot=True,
+        plot_metric="dpsi",
+        save_path=plot_phantom_con,
+        top_n=3)
         total_violations_con += stats_con['n_violations']
         total_rays_with_violation_con += stats_con['n_rays_with_violation']
         total_rays_checked_con += stats_con['n_rays_checked']
 
         # --- Check non-concentric table ---
-        violations_non_con, stats_non_con, theta_histogram_non_con, top_by_dt_non_con, top_by_dpsi_non_con = tb.check_ray_monotonicity(int_table)
+        violations_non_con, stats_non_con, beta_histogram_non_con, top_by_dt_non_con, top_by_dpsi_non_con = tb_con.check_ray_monotonicity(
+        int_table,
+        type="ilp",
+        plot=True,
+        plot_metric="dpsi",
+        save_path=plot_phantom_ilp,
+        top_n=3)
         total_violations_non_con += stats_non_con['n_violations']
         total_rays_with_violation_non_con += stats_non_con['n_rays_with_violation']
         total_rays_checked_non_con += stats_non_con['n_rays_checked']
@@ -4114,7 +4122,7 @@ def run_ray_monotonicity_check() :
             },
             'non_concentric': {
                 'stats': stats_non_con,
-                'theta_histogram': {str(k): v for k, v in sorted(theta_histogram_non_con.items())},
+                'beta_histogram': {str(k): v for k, v in sorted(beta_histogram_non_con.items())},
                 'top_violations_by_dt': top_by_dt_non_con,
                 'top_violations_by_dpsi': top_by_dpsi_non_con,
             },
@@ -4150,7 +4158,7 @@ def run_ray_monotonicity_check() :
 
     # Summary message
     summary = (
-        "Ray monotonicity check complete.\n"
+        "Phantom check complete.\n"
         "{} interceptor type(s) checked, {} failed to load.\n"
         "Concentric: {} violation(s) across {} of {} rays checked.\n"
         "Non-concentric: {} violation(s) across {} of {} rays checked.\n"
@@ -4163,7 +4171,7 @@ def run_ray_monotonicity_check() :
     )
 
     print("\n" + summary)
-    pop_message("Ray monotonicity check", summary)
+    pop_message("Phantom check", summary)
 
 """ END of run_ray_monotonicity_check """
 

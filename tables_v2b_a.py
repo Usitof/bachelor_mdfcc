@@ -33,7 +33,7 @@ Column layout of int_table_v2 (angle-outer grid, one entry per theta ray):
     [0] psi_launch  [deg]
     [1] time        [s]
     [2] rv          [m]   ← what the search in short_search compares against m_rad
-    [3] theta_j     [rad] ← the ray's angle (same for every row in the segment)
+    [3] theta_j    [rad] ← the ray's angle (same for every row in the segment)
 """
 
 import numpy as np
@@ -355,12 +355,17 @@ def mis_traj_sample(tar_trj, beta_step=None, psi_deg=0.0, phi_deg=0.0, concentri
 # 4.  Ray monotonicity check ("phantom" interception point detector)
 # ===========================================================================
 
-def check_ray_monotonicity(int_table_con):
+def check_ray_monotonicity(int_table,
+    type="concentric",
+    plot=True,
+    plot_metric="dpsi",
+    save_path=None,
+    top_n=3):
     """
-    Diagnostic for the angle-outer (concentric) interceptor table.
+    Diagnostic for the both interceptor tables.
 
-    Each ray theta_j is built by interception_table() from whichever raw
-    trajectory (of the whole psi_launch fan) reaches (theta_j, rv) earliest,
+    Each ray theta_j/beta_j is built by interception_table() from whichever raw
+    trajectory (of the whole psi_launch fan) reaches (theta_j/beta_j, rv) earliest,
     independently for every radius bucket along the ray. Consecutive rows in
     a ray -- "further along the beam", ascending rv -- are therefore not
     necessarily samples of one continuous flight: the row that wins at one
@@ -379,16 +384,16 @@ def check_ray_monotonicity(int_table_con):
 
     Parameters
     ----------
-    int_table_con : object ndarray
-        Output of interception_table(..., concentric=True): one entry per
-        theta ray, each an (n, 4) array of [psi_deg, time, rv, theta_j],
+    int_table : object ndarray
+        Output of interception_table(...): one entry per
+        theta/beta ray, each an (n, 4) array of [psi_deg, time, rv, theta_j/beta_j],
         sorted ascending by rv.
 
     Returns
     -------
     violations : list of dict
         One entry per violating (row i, row i+1) pair, in ray order. Keys:
-        ray_index, theta_j_deg, row_index, rv_a_km, rv_b_km, t_a, t_b, dt
+        ray_index, theta_j/beta_j_deg, row_index, rv_a_km, rv_b_km, t_a, t_b, dt
         (t_b - t_a, negative by construction), psi_a_deg, psi_b_deg,
         dpsi_deg (|psi_b - psi_a|, the tell for "two different trajectories
         stitched together").
@@ -408,17 +413,18 @@ def check_ray_monotonicity(int_table_con):
     TOP_N = 3
 
     violations = []
-    n_rays = len(int_table_con)
+    n_rays = len(int_table)
     n_rays_checked = 0
     n_pairs_checked = 0
     dpsi_all = []
+    angle_key = "beta_j_deg" if type == "ilp" else "theta_j_deg"
 
     for k in range(n_rays):
-        ray = int_table_con[k]
+        ray = int_table[k]
         if ray is None or len(ray) < 2:
             continue
         n_rays_checked += 1
-        theta_j = ray[0, 3]
+        angle_rad = ray[0, 3]
 
         for i in range(len(ray) - 1):
             psi_a, t_a, rv_a = ray[i, 0], ray[i, 1], ray[i, 2]
@@ -436,7 +442,7 @@ def check_ray_monotonicity(int_table_con):
             if dpsi > fcc_constants.psi_step:
                 violations.append({
                     'ray_index': k,
-                    'theta_j_deg': degrees(theta_j),
+                    angle_key: degrees(angle_rad),
                     'row_index': i,
                     'rv_a_km': rv_a / 1000.0, 'rv_b_km': rv_b / 1000.0,
                     't_a': float(t_a), 't_b': float(t_b), 'dt': float(t_b - t_a),
@@ -457,72 +463,86 @@ def check_ray_monotonicity(int_table_con):
         'dpsi_violations_mean': (sum(viol_dpsi) / len(viol_dpsi)) if viol_dpsi else None,
         'dpsi_all_mean': (sum(dpsi_all) / len(dpsi_all)) if dpsi_all else None,
     }
-    theta_histogram = {}
+    angle_histogram = {}
     if violations:
         for v in violations:
-            th = v['theta_j_deg']
+            th = v[angle_key]
             bin_start = float(int(th // BIN_SIZE_DEG) * BIN_SIZE_DEG)
             bin_key = f"{bin_start:.1f}_to_{bin_start + BIN_SIZE_DEG:.1f}_deg"
-            theta_histogram[bin_key] = theta_histogram.get(bin_key, 0) + 1
-    plot_violation_histogram(violations)
+            angle_histogram[bin_key] = angle_histogram.get(bin_key, 0) + 1
 
-    # 3. Top 10 worst time inversions (most negative dt)
+    if plot:
+        plot_violation_histogram(
+            violations, metric=plot_metric, type=type, save_path=save_path
+        )
+
+    # 3. Top 3 worst time inversions (most negative dt)
     top_by_dt = sorted(violations, key=lambda v: v['dt'])[:TOP_N]
 
-    # 4. Top 10 largest launch angle discontinuities
+    # 4. Top 3 largest launch angle discontinuities
     top_by_dpsi = sorted(violations, key=lambda v: v['dpsi_deg'], reverse=True)[:TOP_N]
 
-    return violations, stats, theta_histogram, top_by_dt, top_by_dpsi
+    return violations, stats, angle_histogram, top_by_dt, top_by_dpsi
 
 """ End of check_ray_monotonicity """
 
 import matplotlib.pyplot as plt
 
-def plot_violation_histogram(violations, metric='dpsi'):
-    """
-    Plots a histogram overlaying theta against a violation severity metric.
-    
+def plot_violation_histogram(
+    violations, metric="dpsi", type="concentric", save_path=None
+):
+    """Plots a 2D histogram overlaying ray angle against a violation severity metric.
+
     Parameters
     ----------
     violations : list of dict
-        The output from check_ray_monotonicity().
-    metric : str, optional
-        'dpsi' to plot the launch angle gap (degrees).
-        'dt' to plot the negative time steps (seconds).
+        Output from check_ray_monotonicity().
+    metric : str, optional ('dpsi' or 'dt')
+        Metric to display on the y-axis.
+    type : str, optional ('ilp' or 'concentric')
+        Determines ray angle label semantics and plot title.
+    save_path : str, optional
+        Path to save the plot figure. If None, displays via plt.show().
     """
     if not violations:
         print("No violations found to plot!")
         return
 
-    thetas = [v['theta_j_deg'] for v in violations]
-    
-    if metric == 'dpsi':
-        y_data = [v['dpsi_deg'] for v in violations]
+    angle_key = "beta_j_deg" if type == "ilp" else "theta_j_deg"
+    angle_symbol = r"\beta" if type == "ilp" else r"\theta"
+
+    thetas = [v[angle_key] for v in violations]
+
+    if metric == "dpsi":
+        y_data = [v["dpsi_deg"] for v in violations]
         y_label = r"Launch Angle Gap $\Delta\psi$ (degrees)"
-        cmap = 'YlOrRd' 
-    elif metric == 'dt':
-        y_data = [v['dt'] for v in violations]
-        y_label = r"Negative Time Step $\Delta t$ (seconds)"
-        cmap = 'magma'  
+        cmap = "YlOrRd"
+    elif metric == "dt":
+        y_data = [v["dt"] for v in violations]
+        y_label = r"Time Step $\Delta t$ (seconds)"
+        cmap = "magma"
     else:
         raise ValueError("Metric must be either 'dpsi' or 'dt'")
 
+    plt.rcParams.update({"font.size": 14})
     plt.figure(figsize=(10, 6))
-    
     counts, xedges, yedges, im = plt.hist2d(
-        thetas, y_data, 
-        bins=[40, 40], 
-        cmap=cmap, 
-        cmin=1 
+        thetas, y_data, bins=[40, 40], cmap=cmap, cmin=1
     )
     
-    plt.xlabel(r"Ray Angle $\theta$ (degrees)", fontsize=11)
-    plt.ylabel(y_label, fontsize=11)
-    plt.title("Concentric")
-    
+
+    plt.xlabel(
+        rf"Ray Angle ${angle_symbol}$ (degrees)"
+    )
+    plt.ylabel(y_label)
+    # plt.title(save_path)
+
     cb = plt.colorbar(im)
-    cb.set_label('Number of Violations (Density)', rotation=270, labelpad=15)
-    
-    plt.grid(True, linestyle=':', alpha=0.6)
+    cb.set_label("Number of Violations", rotation=270, labelpad=30)
+    plt.grid(True, linestyle=":", alpha=0.6)
     plt.tight_layout()
-    plt.show()
+
+    if save_path:
+        plt.savefig(save_path)
+    else:
+        plt.show()
