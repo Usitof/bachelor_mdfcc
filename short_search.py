@@ -41,12 +41,21 @@ def _theta_ilp(xi, cos_psi, sin_psi, cos_phi):
     return acos(c)
 
 
-def _ray_time_at_radius(ray, m_rad) :
+def _ray_time_at_radius(ray, m_rad, psi_gate_deg=None) :
     """
     Interceptor flight time to reach geocentric radius m_rad on one ray, by
     radius bracket + linear interpolation in radius.
     Returns ((t, psi), True) if m_rad is inside the ray's radius span, else (None, False).
     ray columns: [psi_deg, time, rv, theta].
+
+    psi_gate_deg : phantom-point guard. interception_table() can end up
+    bracketing m_rad between two rows whose psi_launch (column 0) came from
+    very different trajectories (one depressed, one lofted) that just
+    happened to win neighbouring radius buckets -- interpolating between
+    them blends two unrelated flights into a point matching neither. If
+    psi_gate_deg is given and the two bracketing rows' psi differ by more
+    than that, this returns not-reachable instead of interpolating across
+    them. None (default) disables the check -- unchanged original behaviour.
     """
     rr = ray[:, 2]
     n = len(ray)
@@ -59,6 +68,8 @@ def _ray_time_at_radius(ray, m_rad) :
             i_b = i_x
         else :
             i_a = i_x
+    if psi_gate_deg is not None and abs(ray[i_a, 0] - ray[i_b, 0]) > psi_gate_deg :
+        return None, False
     r1, r2 = rr[i_a], rr[i_b]
     denom = r2 - r1
     f = 0.0 if abs(denom) < 1e-12 else (m_rad - r1) / denom
@@ -67,7 +78,7 @@ def _ray_time_at_radius(ray, m_rad) :
     return (t, psi), True
 
 
-def _flight_time_two_ray(int_table, theta_grid, theta, m_rad) :
+def _flight_time_two_ray(int_table, theta_grid, theta, m_rad, psi_gate_deg=None) :
     """
     Two-ray-interpolated interceptor flight time at ILP angle `theta` and
     radius m_rad. Brackets theta between adjacent rays k, k+1; radius-brackets
@@ -75,6 +86,7 @@ def _flight_time_two_ray(int_table, theta_grid, theta, m_rad) :
     Conservative: both bracketing rays must reach m_rad, otherwise treated as
     unreachable (no one-sided extrapolation).
     theta_grid: ascending array of ray angles = [int_table[k][0,3]].
+    psi_gate_deg : forwarded to _ray_time_at_radius, see there.
     """
     if theta < theta_grid[0] or theta > theta_grid[-1] :
         return {'reachable': False, 't': None, 'psi': None}
@@ -83,8 +95,8 @@ def _flight_time_two_ray(int_table, theta_grid, theta, m_rad) :
     th_k, th_k1 = theta_grid[k], theta_grid[k + 1]
     ray_k, ray_k1 = int_table[k], int_table[k + 1]
 
-    rk, ok_k = _ray_time_at_radius(ray_k, m_rad)
-    rk1, ok_k1 = _ray_time_at_radius(ray_k1, m_rad)
+    rk, ok_k = _ray_time_at_radius(ray_k, m_rad, psi_gate_deg)
+    rk1, ok_k1 = _ray_time_at_radius(ray_k1, m_rad, psi_gate_deg)
 
     if ok_k and ok_k1 :
         denom = th_k1 - th_k
@@ -97,7 +109,8 @@ def _flight_time_two_ray(int_table, theta_grid, theta, m_rad) :
 
 
 def _concentric_forward_search(trj, int_table, psi_rad, phi_rad,
-                               t_int_lnc, t_end, h_int_min, maxia, op_range, R_e) :
+                               t_int_lnc, t_end, h_int_min, maxia, op_range, R_e,
+                               psi_gate_deg=None) :
     """
     Forward walk over the RAW missile trajectory (trj, as passed into
     short_search -- not the shift/turn-transformed tar_traj) looking for the
@@ -107,6 +120,9 @@ def _concentric_forward_search(trj, int_table, psi_rad, phi_rad,
     from its own launch point). psi_rad = dist_opt / R_e is the ILP-to-MLP
     arc, phi_rad = fi_opt is the trajectory-plane dihedral (see module note
     above on the xi convention this requires).
+
+    psi_gate_deg : forwarded to _flight_time_two_ray / _ray_time_at_radius,
+    see there (phantom-point guard, None = off = unchanged behaviour).
 
     Returns a 5-tuple-as-array [m_time, m_rad, alfa, int_psi_deg,
     int_flight_time] for the first feasible point (scanning forward in
@@ -154,7 +170,7 @@ def _concentric_forward_search(trj, int_table, psi_rad, phi_rad,
             if slant_range > op_range :
                 continue
 
-        look = _flight_time_two_ray(int_table, theta_grid, theta, m_rad)
+        look = _flight_time_two_ray(int_table, theta_grid, theta, m_rad, psi_gate_deg)
         if not look['reachable'] :
             continue
 
@@ -166,7 +182,7 @@ def _concentric_forward_search(trj, int_table, psi_rad, phi_rad,
 
     return False
 
-def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, op_range, det_range, t_delay=0, h_discr=0, mode2=False, debug_hits=False, sls_second=False, concentric=False, mrange=None) :
+def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, op_range, det_range, t_delay=0, h_discr=0, mode2=False, debug_hits=False, sls_second=False, concentric=False, mrange=None, psi_gate_deg=None) :
     """
     Finds the earliest interception point.
     
@@ -198,6 +214,17 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
         missile range in metres (trj[-1, 2] * R_e); computed from trj if not given.
         Only used to convert the found hit's (omega, shift) into (x, y) km for the
         returned array -- it does not affect reachability.
+    psi_gate_deg :
+        phantom-point guard, both search paths. interception_table() (classic
+        and concentric) can end up bracketing a query radius between two rows
+        whose psi_launch (source trajectory) differ a lot -- one depressed,
+        one lofted -- so linearly interpolating between them (concentric:
+        _ray_time_at_radius; classic: the equivalent inline radius-bisection
+        further below) blends two unrelated flights into a point matching
+        neither. If set, any such interpolation between two rows whose psi
+        differs by more than psi_gate_deg is refused (treated as not
+        reachable at that point) instead of blended. None (default) disables
+        the check, i.e. unchanged original behaviour, in both paths.
 
     Returns
     -------
@@ -323,7 +350,8 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
         phi_rad = fi_opt           # fi_opt ("omega") is already radians
 
         _hit = _concentric_forward_search(trj, int_table, psi_rad, phi_rad,
-                                          t_int_lnc, t_end, h_int_min, maxia, op_range, R_e)
+                                          t_int_lnc, t_end, h_int_min, maxia, op_range, R_e,
+                                          psi_gate_deg)
         if _hit is False :
             return False
 
@@ -470,10 +498,19 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
                 
                             psi1 = int_table[i_i_beta][i_hit - 1, 0]
                             psi2 = int_table[i_i_beta][i_hit, 0]
-                            psi_hit = psi1 + (psi2 - psi1) * (m_rad - r1) / (r2 - r1)
-                                
-                            #hit = [psi_hit, t_hit, m_rad, int_table[i_i_beta][1, 3]], mis_traj[i_m_beta]
-                            hit = [psi_hit, t_hit, m_rad, int_table[i_i_beta][1, 3]], mis_traj[i_m_beta], int_table[i_i_beta][i_hit - 1], int_table[i_i_beta][i_hit]
+
+                            if psi_gate_deg is not None and abs(psi1 - psi2) > psi_gate_deg :
+                                # phantom-point guard: the two rows bracketing m_rad come from
+                                # source trajectories too far apart in psi_launch to trust a
+                                # linear blend between them -- treat as no hit at this beta,
+                                # same as short_search's concentric path (see psi_gate_deg
+                                # in the docstring above).
+                                hit = False
+                            else :
+                                psi_hit = psi1 + (psi2 - psi1) * (m_rad - r1) / (r2 - r1)
+
+                                #hit = [psi_hit, t_hit, m_rad, int_table[i_i_beta][1, 3]], mis_traj[i_m_beta]
+                                hit = [psi_hit, t_hit, m_rad, int_table[i_i_beta][1, 3]], mis_traj[i_m_beta], int_table[i_i_beta][i_hit - 1], int_table[i_i_beta][i_hit]
                         
                         elif int_table[i_i_beta][0, 2] == m_rad :
                             #hit = int_table[i_i_beta][0], mis_traj[i_m_beta]
@@ -649,16 +686,16 @@ def short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, 
 """ End of short_search """
 
 def short_search2(trj, int_table, h_int_min, maxia, t_int_lnc, omega, shift, op_range, det_range, 
-                  t_delay=0, h_discr=0, debug_hits=False, concentric=False, mrange = None) :
+                  t_delay=0, h_discr=0, debug_hits=False, concentric=False, mrange = None, psi_gate_deg=None) :
     if concentric:
         f_alfa = trj[-1, 2] 
         mrange = f_alfa * R_e
     return short_search(trj, int_table, h_int_min, maxia, t_int_lnc, omega, shift, op_range, det_range, 
-                        t_delay, h_discr, True, debug_hits, False, concentric, mrange)
+                        t_delay, h_discr, True, debug_hits, False, concentric, mrange, psi_gate_deg)
 
 def sls_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, op_range, det_range, 
                t_delay=0, h_discr=0, mode2=False, debug_hits=False, 
-               concentric=False, mrange=None):
+               concentric=False, mrange=None, psi_gate_deg=None):
     """
     Finds interception points for shoot-look-shoot mode. First, runs short_search, then takes missile time at the first interception point
     and runs short_search again passing missile time instead of t_int_lnc. Returns both interception data points to check if this works.
@@ -696,7 +733,7 @@ def sls_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, op
         print(f"[SLS-DEBUG] Parameters: dist_opt={dist_opt:.2f}, t_int_lnc={t_int_lnc:.2f}, t_delay={t_delay}")
 
     # --- FIRST SHOT ---
-    hit_1 = short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, op_range, det_range, t_delay, h_discr, mode2, debug_hits, False, concentric, mrange)
+    hit_1 = short_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, op_range, det_range, t_delay, h_discr, mode2, debug_hits, False, concentric, mrange, psi_gate_deg)
     
     hit_1_valid = False
     if concentric:
@@ -727,7 +764,7 @@ def sls_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, op
             print(f"[SLS-DEBUG] -> HIT 1 valid. Launching Second Shot at t={t_int_lnc_second:.2f}s (t_delay={t_delay}s)...")
 
         # Führe short_search für den zweiten Schuss mit der neuen Startzeit aus
-        hit_2 = short_search(trj, int_table, h_int_min, maxia, t_int_lnc_second, fi_opt, dist_opt, op_range, det_range, t_delay, h_discr, mode2, debug_hits, True, concentric, mrange)
+        hit_2 = short_search(trj, int_table, h_int_min, maxia, t_int_lnc_second, fi_opt, dist_opt, op_range, det_range, t_delay, h_discr, mode2, debug_hits, True, concentric, mrange, psi_gate_deg)
     
         hit_2_valid = False
         if concentric:
@@ -757,7 +794,7 @@ def sls_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, op
 
 
 def sls_search2(trj, int_table, h_int_min, maxia, t_int_lnc, omega, shift, op_range, det_range, 
-                t_delay=0, h_discr=0, debug_hits=False, concentric=False) :
+                t_delay=0, h_discr=0, debug_hits=False, concentric=False, psi_gate_deg=None) :
     
     if concentric:
         f_alfa = trj[-1, 2]
@@ -769,7 +806,7 @@ def sls_search2(trj, int_table, h_int_min, maxia, t_int_lnc, omega, shift, op_ra
         trj, int_table, h_int_min, maxia, t_int_lnc, 
         fi_opt=omega, dist_opt=shift, op_range=op_range, det_range=det_range, 
         t_delay=t_delay, h_discr=h_discr, mode2=True, 
-        debug_hits=debug_hits, concentric=concentric, mrange=mrange
+        debug_hits=debug_hits, concentric=concentric, mrange=mrange, psi_gate_deg=psi_gate_deg
     )
 
 
@@ -1208,7 +1245,7 @@ def footprint_mode2(s_func, # s_func muss entweder short_search2 oder sls_search
             )
             beta_min = -max_theta / 2
             int_max_range = max_theta * R_e
-            print("alpha_max={:.2f}, concentric_max_separation={:.1f} km".format(
+            print("theta_max={:.2f}, concentric_max_separation={:.1f} km".format(
                 degrees(max_theta), int_max_range / 1000))
         else:
             beta_min = active_table[0][0, 3] - radians(beta_step)

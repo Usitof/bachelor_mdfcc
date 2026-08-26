@@ -17,7 +17,7 @@
             "a_nz": "d 0.596",
             "c_bal": "10000#7020 # not real",
             "vert_launch_height": "20000 # ALBM: launch altitude",
-            "grav_turn_angle": "41 # ALBM: launch angle from vertical",
+            "grav_turn_angle": "81 # ALBM: launch angle from vertical",
             "range": "albm 830 # ALBM: launch speed, m/s # reported: 3000 km/h = 833 m/s",
             "traj_type": "bal_mis",
             "note": ""
@@ -468,15 +468,15 @@
             "m_pl": "36.0",
             "a_nz": "0",
             "c_bal": "4650",
-            "vert_launch_height": "25000",
+            "vert_launch_height": "100",
             "flight_path_angle": "40",
             "range": "4000",
             "traj_type": "int_exo",
             "mpia": "",
+            "maxia": "",
             "op_range": "",
             "det_range": "0, 142, 129, 99, 85, 76, 67, 0",
-            "note": "",
-            "maxia": ""
+            "note": ""
         },
         {
             "i_key": 12,
