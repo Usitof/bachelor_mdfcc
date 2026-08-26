@@ -714,11 +714,13 @@ def plot_hit_verify(time, alti, itime, ialti, ibeta, mbeta, mtime, hit_m, hit_i,
 
     ax_alt.plot(mtime, mbeta, c='cyan', linewidth=1, label='missile beta')
     ax_alt.plot(itime, ibeta, c='olive', linewidth=1, label='interceptor beta')
+    ibeta_interp = np.interp(mtime, itime, ibeta)
+    gap_beta = np.abs(mbeta - ibeta_interp)
     
-    ax_alt.plot(hit_time, hit_alt_km, marker='X', ms=14, mfc='red', mec='black',
-                linestyle='None', zorder=5, label='claimed intercept (missile curve)')
-    ax_alt.plot(hit_time, hit_alt_km_i, marker='+', ms=16, mew=3, mec='black',
-                linestyle='None', zorder=5, label='claimed intercept (interceptor curve)')
+    #ax_alt.plot(hit_time, hit_alt_km, marker='X', ms=14, mfc='red', mec='black',
+                #linestyle='None', zorder=5, label='claimed intercept (missile curve)')
+    #ax_alt.plot(hit_time, hit_alt_km_i, marker='+', ms=16, mew=3, mec='black',
+                #linestyle='None', zorder=5, label='claimed intercept (interceptor curve)')
 
     ax_alt.axvline(x=hit_time, c='red', linewidth=1, linestyle=':',
                    label='interception time {:.2f}'.format(hit_time))
@@ -728,12 +730,21 @@ def plot_hit_verify(time, alti, itime, ialti, ibeta, mbeta, mtime, hit_m, hit_i,
     ax_alt.set_ylabel('Altitude, km')
     ax_alt.legend(loc='best', frameon=False, framealpha=1.0, fontsize=9)
 
-    ax_gap.plot(itime[i_mask], gap, c='purple', linewidth=1.5)
+    ax_gap.plot(itime[i_mask], gap, c='purple', linewidth=1.5, label='Altitude gap (km)')
     ax_gap.axvline(x=hit_time, c='red', linewidth=1, linestyle=':')
     ax_gap.axhline(y=0, c='gray', linewidth=0.75)
     ax_gap.set_ylabel('|missile - interceptor|\naltitude gap, km')
     ax_gap.set_xlabel('Time from missile launch, s')
     ax_gap.set_xlim([t_lo, t_hi])
+
+    ax_gap_beta = ax_gap.twinx()
+    ax_gap_beta.plot(mtime, gap_beta, c='magenta', linewidth=1.2, linestyle=':', label=r'Angle gap $\Delta\beta$ (deg)')
+    ax_gap_beta.set_ylabel(r'$\Delta \beta$, deg')
+
+    g_lines = ax_gap.get_lines() + ax_gap_beta.get_lines()
+    g_lines = [l for l in g_lines if not l.get_label().startswith('_')]
+    g_labels = [l.get_label() for l in g_lines]
+    ax_gap.legend(g_lines, g_labels, loc='best', frameon=False, fontsize=8)
 
     if not mode2 :
         title = "Hit verification: mtype={} itype={} angle={:.1f} dist={:.1f} psi={:.2f}".format(

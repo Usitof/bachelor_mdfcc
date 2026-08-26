@@ -4278,7 +4278,7 @@ def run_phantom_point_fix_compare() :
     psi_gate_deg = fcc_constants.psi_step * 1.01
     search_func_m2_fixed = functools.partial(search_func_m2, psi_gate_deg=psi_gate_deg)
 
-    print("\nOriginal + concentric (unguarded) ...")
+    print("\nILP centered + concentric (unguarded) ...")
     footprint_results = ss.footprint_mode2(search_func_m2, trj, int_table, h_int_min, maxia, t_int_lnc,
                                            angle_step_mode2, op_range, det_range, t_delay, h_discr,
                                            acc, num_steps_mode2, plot_hit_charts, hit_chart_angle,
@@ -4286,7 +4286,7 @@ def run_phantom_point_fix_compare() :
     footprint_tab_classic = footprint_results[0]
     footprint_tab_con_orig = footprint_results[1]
 
-    print("\nConcentric (psi_gate_deg={:.3f}, phantom) ...".format(psi_gate_deg))
+    print("\nILP centered + concentric (psi_gate_deg={:.3f}, phantom) ...".format(psi_gate_deg))
     footprint_results_fixed = ss.footprint_mode2(search_func_m2_fixed, trj, int_table, h_int_min, maxia, t_int_lnc,
                                                   angle_step_mode2, op_range, det_range, t_delay, h_discr,
                                                   acc, num_steps_mode2, plot_hit_charts, hit_chart_angle,
@@ -6192,8 +6192,8 @@ if __name__ == '__main__':
     btn_phantom_fix_compare = Button(frame_pp, text='Compare Phantom-Point Fix', command=lambda: call_longrun(run_phantom_point_fix_compare))
 
     if tooltips:
-        ToolTip(btn_ray_monotonicity, msg="For every interceptor type, check the concentric table for\n\"phantom\" interception points (rays where a later point is\nan earlier time -- a sign two different trajectories got\nstitched together). Diagnostic only, can take a while.", delay=1.0)
-        ToolTip(btn_phantom_fix_compare, msg="Runs the current missile/interceptor's mode2 footprint three ways\n(ILP-centered, Concentric original, Concentric with the\npsi_gate_deg phantom-point fix) and plots all three for comparison.", delay=1.0)
+        ToolTip(btn_ray_monotonicity, msg="For every interceptor type, check both tables for\n\"phantom\" interception points (rays where two different far from each other lying trajectories got\nstitched together). Diagnostic only, can take a while.", delay=1.0)
+        ToolTip(btn_phantom_fix_compare, msg="Runs the current missile/interceptor's mode2 footprint four ways\n(ILP-centered, Concentric original, ILP and Concentric with the\npsi_gate_deg phantom-point fix) and plots all for comparison.", delay=1.0)
 
     btn_ray_monotonicity.grid(column=0, row=0, sticky='ew')
     btn_phantom_fix_compare.grid(column=0, row=1, sticky='ew')
