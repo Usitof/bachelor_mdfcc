@@ -36,6 +36,7 @@ Column layout of int_table_v2 (angle-outer grid, one entry per theta ray):
     [3] theta_j    [rad] ← the ray's angle (same for every row in the segment)
 """
 
+import time
 import numpy as np
 from math import radians, degrees, cos, sin, acos, atan2, pi, sqrt, ceil
 from multiprocessing import Pool, cpu_count
@@ -106,13 +107,14 @@ def interceptor_table(interc_data, ind_flight_dataprint=False, psi_step=0.25):
     # max_psi = 120 covers both positive and negative flight path angles
     # (flight_path_angle = 90° - psi).  For psi > 90°, the interceptor
     # is launched downwards – necessary to reach points behind the ILP.
+    start = time.time()
     max_psi = 90 
     psi_n   = int(max_psi / psi_step)
 
     worker_args = [(interc_data.copy(), psi_step, j) for j in range(psi_n)]
     int_table_0 = np.empty(psi_n, dtype=object)
 
-    print("\n[Angle-Outer] Building raw interceptor fan …")
+    print("\n[Angle-Outer] Building interceptor table…")
     with Pool(processes=max(1, cpu_count() - 1)) as pool:
         for i, (traj, max_rv) in enumerate(pool.imap(_int_trj_worker, worker_args)):
             int_table_0[i] = traj
@@ -120,7 +122,8 @@ def interceptor_table(interc_data, ind_flight_dataprint=False, psi_step=0.25):
                 print(f"\r  {i / (psi_n - 1) * 100:5.1f}%  psi={i * psi_step:5.1f}°  "
                       f"apogee={(max_rv - R_e) / 1000:7.1f} km", end="")
 
-    print("\n[Angle-Outer] Raw fan complete.")
+    end = time.time()
+    print("\n[Angle-Outer] Interceptor table complete; calculation time: ", round(end - start , 2), " seconds")
     return int_table_0
 
 
@@ -141,6 +144,7 @@ def interception_table(interceptor_data, int_table_v1,
 
     Output columns per ray:  [psi_deg, time, rv_m, theta_j_rad]
     """
+    start = time.time()
     if int_table_v1 is not None and hasattr(int_table_v1, "__len__") and len(int_table_v1) == 3:
         if isinstance(int_table_v1, (list, np.ndarray)) and not isinstance(int_table_v1, dict):
             int_table_v1 = int_table_v1[2]
@@ -201,7 +205,7 @@ def interception_table(interceptor_data, int_table_v1,
                 i_time = tm1 + factor * (tm2 - tm1)
                 ray_hits[k].append([psi_deg_val, i_time, i_rv, theta_j])
 
-    print(f"\n[Angle-Outer] Hits collected. Building monotone envelope per ray...")
+    print(f"\n[Angle-Outer] Hits collected. Building interception table...")
 
     out = []
 
@@ -243,7 +247,8 @@ def interception_table(interceptor_data, int_table_v1,
 
         out.append(tab if len(tab) > 0 else np.array([[0.0, 0.0, _R_E, theta_j]], dtype=np.float64))
 
-    print("\n[Angle-Outer] Grid complete.")
+    end = time.time()
+    print("\n[Angle-Outer] Interception table complete; calculation time: ", round(end - start , 2), " seconds")
     return np.array(out, dtype=object)
 
 

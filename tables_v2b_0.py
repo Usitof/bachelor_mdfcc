@@ -1,5 +1,6 @@
 import numpy as np
 import balmis as bm
+import time
 from math import radians, sin, cos, atan, sqrt, degrees, ceil, pi, asin, floor
 from os import cpu_count
 from multiprocessing import Process, Queue
@@ -98,7 +99,7 @@ def interceptor_table(interc_data, ind_flight_dataprint=False, psi_step=0.25, ar
     -------
     
     """
-
+    start = time.time()
     #psi_step = 5 # psi step
     psi_n = int(90 / psi_step)
     int_table_0 = np.empty(psi_n, dtype=object)
@@ -158,8 +159,10 @@ def interceptor_table(interc_data, ind_flight_dataprint=False, psi_step=0.25, ar
         for j in range(psi_n) :
             int_traj_6 = int_trj_calc(False, interc_data, psi_step, j, False) #False for missing q arguemnt
             int_table_0[j] = int_traj_6
-    
-    print("\nInterceptor trajectory set calculation complete.")
+
+    end = time.time()
+    print("\nInterceptor trajectory set calculation complete; calculation time: ", round(end - start , 2), " seconds")
+
     if arr_obj :
         return(int_table_0)
     else: # needs re-writing ?
@@ -200,6 +203,7 @@ def interception_table(interceptor_data, int_table_v1, psi_step=0.25, beta_step=
     """
     int_table_0: array over psi, for each psi: time, r, beta, x, y
     """
+    start = time.time()
     endo = (interceptor_data["traj_type"] == "int_endo")
     t_burn = sum(interceptor_data["t_bu"]) + sum(interceptor_data["t_delay"]) # TODO
     
@@ -449,6 +453,9 @@ def interception_table(interceptor_data, int_table_v1, psi_step=0.25, beta_step=
     with open("int_table_samp_dump.json", 'w') as rdf:
             rdf.write(json_array)
     """
+
+    end = time.time()
+    print("\nInterception table calculation complete; calculation time: ", round(end - start , 2), " seconds")
     
     return (int_table)
 
