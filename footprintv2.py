@@ -657,109 +657,6 @@ def fp_chart_n__not_used(ftprint_arr, label_arr, info_string, title_string, f_na
     
     print("Chart saved to " + f_name)
     
-
-def plot_hit_verify(time, alti, itime, ialti, ibeta, mbeta, mtime, hit_m, hit_i, i_lnc_time,
-                     m_type, i_type, d_angle, dist, mode2,
-                     chart_fname='charts/hit_chart2.png') :
-    """
-    hit_chart2: a focused sanity check for one claimed interception.
-
-    plot_hit's hit_chart.png overlays a lot at once (beta, radius, altitude,
-    for both shells, over the whole missile flight). This zooms into just
-    the interceptor's flight window and shows one thing clearly: does the
-    interceptor's altitude actually reach the missile's altitude at the
-    claimed interception time? Top panel: missile vs interceptor altitude,
-    with the claimed hit marked on both curves. Bottom panel: the altitude
-    gap between them -- for a geometrically real hit this must run to ~0 km
-    right at the interception time; if it doesn't, the reported hit is
-    almost certainly a search/geometry bug, not a real intercept.
-    """
-    hit_time = hit_m[0]
-
-    flight_span = max(hit_time - i_lnc_time, 1.0)
-    t_lo = i_lnc_time - 0.10 * flight_span
-    t_hi = hit_time + 0.25 * flight_span
-
-    m_mask = (time >= t_lo) & (time <= t_hi)
-    i_mask = (itime >= t_lo) & (itime <= t_hi)
-    if not np.any(m_mask) :
-        m_mask = np.ones_like(time, dtype=bool)
-    if not np.any(i_mask) :
-        i_mask = np.ones_like(itime, dtype=bool)
-
-    # missile altitude interpolated onto the interceptor's own time samples,
-    # so the gap panel compares like-for-like even though the two
-    # trajectories aren't sampled on the same time grid
-    order = np.argsort(time)
-    m_alt_on_itime = np.interp(itime[i_mask], time[order], alti[order])
-    gap = np.abs(m_alt_on_itime - ialti[i_mask])
-
-    # hit_m[1] is *not* a consistent quantity to read the intercept altitude
-    # from: for the classic tuple path it's mis_traj's local ILP-relative
-    # range, for the concentric array path it's the raw geocentric radius --
-    # same index, two different physical quantities depending on which
-    # search produced it. Reading the marker off the trusted, already-correct
-    # altitude curves (interpolated at hit_time) sidesteps that entirely.
-    hit_alt_km = float(np.interp(hit_time, time[order], alti[order]))
-    order_i = np.argsort(itime)
-    hit_alt_km_i = float(np.interp(hit_time, itime[order_i], ialti[order_i]))
-
-    fig, (ax_alt, ax_gap) = plt.subplots(
-        2, 1, figsize=(8, 7), sharex=True,
-        gridspec_kw={'height_ratios': [2.2, 1]}
-    )
-
-    ax_alt.plot(time[m_mask], alti[m_mask], c='blue', linewidth=2, label='missile altitude')
-    ax_alt.plot(itime[i_mask], ialti[i_mask], c='green', linewidth=2, label='interceptor altitude')
-
-    ax_alt.plot(mtime, mbeta, c='cyan', linewidth=1, label='missile beta')
-    ax_alt.plot(itime, ibeta, c='olive', linewidth=1, label='interceptor beta')
-    ibeta_interp = np.interp(mtime, itime, ibeta)
-    gap_beta = np.abs(mbeta - ibeta_interp)
-    
-    #ax_alt.plot(hit_time, hit_alt_km, marker='X', ms=14, mfc='red', mec='black',
-                #linestyle='None', zorder=5, label='claimed intercept (missile curve)')
-    #ax_alt.plot(hit_time, hit_alt_km_i, marker='+', ms=16, mew=3, mec='black',
-                #linestyle='None', zorder=5, label='claimed intercept (interceptor curve)')
-
-    ax_alt.axvline(x=hit_time, c='red', linewidth=1, linestyle=':',
-                   label='interception time {:.2f}'.format(hit_time))
-    ax_alt.axvline(x=i_lnc_time, c='orange', linewidth=1, linestyle=':',
-                   label='interceptor launch {:.2f}'.format(i_lnc_time))
-
-    ax_alt.set_ylabel('Altitude, km')
-    ax_alt.legend(loc='best', frameon=False, framealpha=1.0, fontsize=9)
-
-    ax_gap.plot(itime[i_mask], gap, c='purple', linewidth=1.5, label='Altitude gap (km)')
-    ax_gap.axvline(x=hit_time, c='red', linewidth=1, linestyle=':')
-    ax_gap.axhline(y=0, c='gray', linewidth=0.75)
-    ax_gap.set_ylabel('|missile - interceptor|\naltitude gap, km')
-    ax_gap.set_xlabel('Time from missile launch, s')
-    ax_gap.set_xlim([t_lo, t_hi])
-
-    ax_gap_beta = ax_gap.twinx()
-    ax_gap_beta.plot(mtime, gap_beta, c='magenta', linewidth=1.2, linestyle=':', label=r'Angle gap $\Delta\beta$ (deg)')
-    ax_gap_beta.set_ylabel(r'$\Delta \beta$, deg')
-
-    g_lines = ax_gap.get_lines() + ax_gap_beta.get_lines()
-    g_lines = [l for l in g_lines if not l.get_label().startswith('_')]
-    g_labels = [l.get_label() for l in g_lines]
-    ax_gap.legend(g_lines, g_labels, loc='best', frameon=False, fontsize=8)
-
-    if not mode2 :
-        title = "Hit verification: mtype={} itype={} angle={:.1f} dist={:.1f} psi={:.2f}".format(
-            m_type, i_type, d_angle, dist / 1000, hit_i[0])
-    else :
-        title = "Hit verification: mtype={} itype={} angle={:.1f} shift={:.1f} psi={:.2f}".format(
-            m_type, i_type, d_angle, dist / 1000, hit_i[0])
-    fig.suptitle(title)
-
-    m.keep_old_file(chart_fname)
-    fig.savefig(chart_fname, dpi=300, bbox_inches='tight', pad_inches=0.2)
-    plt.close(fig)
-""" End of plot_hit_verify """
-
-
 def plot_hit(hit_info,
              trj_0,
              m_type,
@@ -931,13 +828,76 @@ def plot_hit(hit_info,
         chart_fname2 = chart_fname[:-4] + '2.png'
     else :
         chart_fname2 = chart_fname + '2'
-    plot_hit_verify(time, alti, itime, ialti, ibeta, mbeta, mtime, hit_m, hit_i, i_lnc_time,
+    plot_hit_verify2(time, alti, itime, ialti, ibeta, mbeta, mtime, hit_m, hit_i, i_lnc_time,
                      m_type, i_type, d_angle, dist, mode2,
                      chart_fname=chart_fname2)
 
     
 """End of plot_hit() """
+
+def plot_hit_verify2(time, alti, itime, ialti, ibeta, mbeta, mtime, hit_m, hit_i, i_lnc_time,
+                     m_type, i_type, d_angle, dist, mode2,
+                     chart_fname='charts/hit_chart2.png'):
+    hit_time = hit_m[0]
+
+    flight_span = max(hit_time - i_lnc_time, 1.0)
+    t_lo = i_lnc_time - 0.10 * flight_span
+    t_hi = hit_time + 0.25 * flight_span
+
+    m_mask = (time >= t_lo) & (time <= t_hi)
+    i_mask = (itime >= t_lo) & (itime <= t_hi)
+    if not np.any(m_mask):
+        m_mask = np.ones_like(time, dtype=bool)
+    if not np.any(i_mask):
+        i_mask = np.ones_like(itime, dtype=bool)
+
+    fig, ax_alt = plt.subplots(figsize=(4.2, 3.5))
+    ax_beta = ax_alt.twinx()
+
+    ax_alt.plot(time[m_mask], alti[m_mask], c='blue', linewidth=1.8, label='missile $r$')
+    ax_alt.plot(itime[i_mask], ialti[i_mask], c='green', linewidth=1.8, label='interceptor $r$')
+
+    ax_beta.plot(mtime, mbeta, c='cyan', linewidth=1.2, linestyle='--', label=r'missile $\beta$')
+    ax_beta.plot(itime, ibeta, c='olive', linewidth=1.2, linestyle='--', label=r'interceptor $\beta$')
+
+    ax_alt.axvline(x=hit_time, c='red', linewidth=1.2, linestyle=':',
+                   label='hit: {:.1f}s'.format(hit_time))
+    ax_alt.axvline(x=i_lnc_time, c='orange', linewidth=1.2, linestyle=':',
+                   label='launch: {:.1f}s'.format(i_lnc_time))
+
+    ax_alt.set_ylabel('Radius, km', fontsize=11, fontweight='bold')
+    ax_beta.set_ylabel(r'$\beta$, deg', fontsize=11, fontweight='bold')
+    ax_alt.set_xlabel('Time from launch, s', fontsize=11)
+    ax_alt.set_xlim([t_lo, t_hi])
     
+    ax_alt.tick_params(axis='both', labelsize=10)
+    ax_beta.tick_params(axis='y', labelsize=10)
+    
+    lines = ax_alt.get_lines() + ax_beta.get_lines()
+    labels = [l.get_label() for l in lines]
+    ax_alt.legend(lines, labels, loc='best', frameon=True, 
+                  facecolor='white', framealpha=0.85, edgecolor='none',
+                  fontsize=8.5, handlelength=1.5, labelspacing=0.3)
+
+    if not mode2:
+        title = r"m={}, i={}" "\n" r"$\omega={:.1f}^\circ$, dist={:.1f}km, $\psi={:.2f}^\circ$".format(
+            m_type, i_type, d_angle, dist / 1000, hit_i[0])
+    else:
+        title = r"m={}, i={}" "\n" r"$\omega={:.1f}^\circ$, dist_opt={:.1f}km, $\psi={:.2f}^\circ$".format(
+            m_type, i_type, d_angle, dist / 1000, hit_i[0])
+    
+    ax_alt.set_title(title, fontsize=10.5, pad=10)
+
+    fig.tight_layout()
+
+    m.keep_old_file(chart_fname)
+    fig.savefig(chart_fname, dpi=300, bbox_inches='tight', pad_inches=0.05)
+    
+    pdf_fname = chart_fname.replace('.png', '') + '.pdf'
+    m.keep_old_file(pdf_fname)
+    fig.savefig(pdf_fname, bbox_inches='tight', pad_inches=0.05)
+    plt.close(fig)
+
 def plot_hit2(hit_info,
              trj_0,
              m_type,

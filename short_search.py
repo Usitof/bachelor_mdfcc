@@ -712,7 +712,7 @@ def sls_search(trj, int_table, h_int_min, maxia, t_int_lnc, fi_opt, dist_opt, op
         min acceptable height of interception
     t_int_lnc :
         earliest possible interceptor launch time counted from missile launch (missile burn time + interceptor launch delay)
-    fi_opt : 
+    fi_op_ranget : 
         direction to impact point from ILP to MLP line, >>>radians<<<
     dist_opt : 
         distance to impact point from ILP
@@ -2016,10 +2016,16 @@ def footprint_mode2(s_func, # s_func muss entweder short_search2 oder sls_search
 
         return [fp_part1, fp_part2]
 
+    start = time.time()
     fp_part_std = _compute_part(t_itable, False)
+    end = time.time()
+    print(f"Computational Time for Search Function ILP: ", round(end - start,2))
 
     if t_itable_con is not None :
+        start = time.time()
         fp_part_con = _compute_part(t_itable_con, True)
+        end = time.time()
+        print(f"Computational Time for Search Function Concentric: ", round(end - start,2))
     else :
         fp_part_con = [np.zeros((0, 5)), np.zeros((0, 5))]
 

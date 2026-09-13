@@ -17,7 +17,7 @@ eps = 0.00001
 angle_eps = 0.000001
 psi_step  = 0.25 # angle step for interceptor trajectories
 beta_step = 0.1  # angle step for trajectories sampling (both interceptor and missile)
-alfa_step = 0.001 # in concentric mode: angle step for trajectories sampling (both interceptor and missile)
+alfa_step = 0.5 # in concentric mode: angle step for trajectories sampling (both interceptor and missile)
 #mrl_factor = 1.0  # index for zig-zagging footprint's max range line
 
 mrl_factor1 = 1.03  #1.03  # index for zig-zagging footprint's max range line
