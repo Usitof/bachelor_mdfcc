@@ -4,6 +4,8 @@ import time
 from math import radians, sin, cos, atan, sqrt, degrees, ceil, pi, asin, floor
 from os import cpu_count
 from multiprocessing import Process, Queue
+import tables_v2b_a as tb_con
+from pathlib import Path
 
 from fcc_constants import beta_step as set_beta_step, R_e, angle_eps, int_vl_height#, int_vl_height_2
 import fcc_constants
@@ -209,6 +211,32 @@ def interception_table(interceptor_data, int_table_v1, psi_step=0.25, beta_step=
     
     beta_max_range = min([int_traj[len(int_traj) - 1][3] for int_traj in int_table_v1 if np.any(int_traj)])
     beta_min = min([min(int_traj[:, 3]) for int_traj in int_table_v1 if np.any(int_traj)])
+    valid_trajectories = [np.asarray(int_traj) for int_traj in int_table_v1 if np.any(int_traj)]
+    
+    beta_min_rad = min([np.min(int_traj[:, 3]) for int_traj in valid_trajectories])
+    
+    beta_max_deg = 90 
+    
+    script_dir = Path(__file__).parent
+    output_dir = script_dir / "images" / "ilp"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    start_deg = int(floor(degrees(beta_min_rad)))
+    end_deg = int(ceil(beta_max_deg))
+    
+    for current_beta_deg in range(start_deg, end_deg + 1):
+        try:
+            current_beta_rad = radians(current_beta_deg)
+            
+            crossings = tb_con.raw_ray_crossings(int_table_v1, current_beta_rad)
+            tb_con.plot_raw_ray_folding(
+                crossings, 
+                current_beta_deg, 
+                save_path=output_dir / f"ilp_{current_beta_deg}.png"
+            )
+        except Exception as e:
+            pass
+
     """
     min_arr = np.empty([0, 5])
     for int_traj in int_table_v1 :
