@@ -2058,69 +2058,81 @@ def gui_fpchart_n(ftprint_arr,
 
             print("Footprint Data saved to ", save_data_fname)
             btn_data_save.configure(state='disabled')
-    
-    
-        def fp_plot() :
-            global fig
-            global ax
-    
-            fig = Figure(figsize = (8, 5), dpi=100)
-            fig.suptitle(title_string, fontsize=12)
-            
+
+
+        def fp_plot(chart_fname='charts/fp_chart.pdf'):
+            global fig, ax
+
+            # 1. Native Subfigure-Größe (3.3 x 3.0 Zoll): LaTeX muss kaum noch skalieren
+            fig = Figure(figsize=(3.3, 3.0), dpi=300)
+
+            # Main Title
+            if 'title_string' in globals() and title_string:
+                fig.suptitle(title_string, fontsize=9.5, fontweight='bold', y=0.98)
+
             ax = fig.add_subplot(111)
-    
+
             n_arr = len(ftprint_arr)
-    
-            if not mode2 :
-                if (n_arr > 1) :
-                    if bw :
+
+            if not mode2:
+                if n_arr > 1:
+                    if bw:
                         linestyle_cycler = cycler('linestyle', ['-', '--', ':', '-.', (0, (3, 3, 1, 3, 1, 3))])
-                    else : 
-                        linestyle_cycler = cycler('color', ['tab:blue', 'r', 'g', 'm', 'k']) +\
-                                       cycler('linestyle', ['-', '--', ':', '-.', (0, (3, 3, 1, 3, 1, 3))])
+                    else:
+                        linestyle_cycler = cycler('color', ['tab:blue', 'r', 'g', 'm', 'k']) + \
+                                        cycler('linestyle', ['-', '--', ':', '-.', (0, (3, 3, 1, 3, 1, 3))])
                     ax.set_prop_cycle(linestyle_cycler)
-            else :
-                if bw :
+            else:
+                if bw:
                     linestyle_cycler = cycler('linestyle', ['-', '-', '--', '--', ':', ':', '-.', '-.', (0, (3, 3, 1, 3, 1, 3)), (0, (3, 3, 1, 3, 1, 3))])
-                else : 
-                    linestyle_cycler = cycler('color', ['tab:blue', 'tab:blue', 'r', 'r', 'g', 'g', 'm', 'm', 'k', 'k']) +\
-                                   cycler('linestyle', ['-', '-', '--', '--', ':', ':', '-.', '-.', (0, (3, 3, 1, 3, 1, 3)), (0, (3, 3, 1, 3, 1, 3))])
+                else:
+                    linestyle_cycler = cycler('color', ['tab:blue', 'tab:blue', 'r', 'r', 'g', 'g', 'm', 'm', 'k', 'k']) + \
+                                    cycler('linestyle', ['-', '-', '--', '--', ':', ':', '-.', '-.', (0, (3, 3, 1, 3, 1, 3)), (0, (3, 3, 1, 3, 1, 3))])
                 ax.set_prop_cycle(linestyle_cycler)
 
-            if not mode2 :    
-                for i_arr in range(n_arr) :
+            if not mode2:
+                for i_arr in range(n_arr):
                     xpoints = ftprint_arr[i_arr][:, 3]
                     ypoints = ftprint_arr[i_arr][:, 4]
-                    if show_titles :
-                        label_i = label_arr[i_arr]
-                    else :
-                        label_i = ''
-                    ax.plot(xpoints, ypoints, label = label_i) #, c='C0') # , marker='.'
-            else :
-                for i_arr in range(n_arr) :
+                    label_i = label_arr[i_arr] if show_titles else ''
+                    ax.plot(xpoints, ypoints, label=label_i, linewidth=1.2)
+            else:
+                for i_arr in range(n_arr):
                     xpoints1 = ftprint_arr[i_arr][0][:, 3]
                     ypoints1 = ftprint_arr[i_arr][0][:, 4]
                     xpoints2 = ftprint_arr[i_arr][1][:, 3]
                     ypoints2 = ftprint_arr[i_arr][1][:, 4]
-                    if show_titles :
-                        label_i = label_arr[i_arr]
-                    else :
-                        label_i = ''
-                    ax.plot(xpoints1, ypoints1, label = label_i) #, c='C0') # , marker='.'
-                    ax.plot(xpoints2, ypoints2, label = '') #, label = label_arr[i_arr]) #, c='C0') # , marker='.'
-                
+                    label_i = label_arr[i_arr] if show_titles else ''
+                    ax.plot(xpoints1, ypoints1, label=label_i, linewidth=1.2)
+                    ax.plot(xpoints2, ypoints2, label='', linewidth=1.2)
+
             ax.plot(0, 0, marker='^', ms=5, mfc='k', mec='k')
-            ax.set_title(new_info_string, fontsize=10, y=0.984)
-        
-            if show_titles and (n_arr > 1) :
-                ax.legend(loc='best', frameon=False, framealpha=1.0)
-                
-            ax.set_xlabel('crossrange, km')
-            ax.set_ylabel('defense downrange, km')
-    
+
+            # 2. Lange Info-Zeile automatisch mehrzeilig umbrechen
+            wrapped_info = "\n".join(textwrap.wrap(new_info_string, width=45)) if 'new_info_string' in globals() else ''
+            ax.set_title(wrapped_info, fontsize=6.5, pad=6, linespacing=1.1)
+
+            # 3. Skalierte Achsenbeschriftungen für Subfigure-Breite
+            ax.set_xlabel('crossrange, km', fontsize=8.5)
+            ax.set_ylabel('defense downrange, km', fontsize=8.5)
+            ax.tick_params(axis='both', labelsize=7.5)
+
+            if show_titles and (n_arr > 1):
+                ax.legend(loc='best', frameon=True, facecolor='white', framealpha=0.85,
+                        edgecolor='none', fontsize=7.0, handlelength=1.2)
+
             ax.axis('equal')
-            ax.grid()
-        """ End of internal functions """
+            ax.grid(True, linestyle='--', alpha=0.5, linewidth=0.6)
+
+            fig.tight_layout()
+
+            # Save logic
+            pdf_fname = chart_fname if chart_fname.endswith('.pdf') else chart_fname + '.pdf'
+            
+            if 'm' in globals() and hasattr(m, 'keep_old_file'):
+                m.keep_old_file(pdf_fname)
+
+            fig.savefig(pdf_fname, format='pdf', bbox_inches='tight', pad_inches=0.03)
         
         fp_draw()
             
@@ -4307,7 +4319,7 @@ def run_phantom_point_fix_compare() :
     data_fname = footprint_path + "/footprint_mode2_m{}_i{}_{}_phantomfix{}.json".format(m_type, i_type, save_label, t_stamp)
     chart_fname = footprint_path + "/footprint_mode2_m{}_i{}_{}_phantomfix{}.png".format(m_type, i_type, save_label, t_stamp)
 
-    label_arr = ['ILP-centered', 'Concentric', 'ILP-centered (phantom)', 'Concentric (phantom)']
+    label_arr = ['ILP-centered', 'Concentric', 'ILP-centered\n(phantom)', 'Concentric\n(phantom)']
     plots_to_render = [footprint_tab_classic, footprint_tab_con_orig, footprint_tab_fixed, footprint_tab_con_fixed]
     gui_fpchart_n(plots_to_render, label_arr, chart_info_str, title_str, chart_fname, header_str, mrange, data_fname, True, False)
 

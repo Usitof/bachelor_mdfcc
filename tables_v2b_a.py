@@ -44,6 +44,7 @@ from multiprocessing import Pool, cpu_count
 import balmis as bm
 import fcc_constants
 from fcc_constants import beta_step, alfa_step, angle_eps, R_e, int_vl_height
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Module-level Earth radius (metres)
@@ -159,6 +160,17 @@ def interception_table(interceptor_data, int_table_v1,
     theta_min = float(np.min(all_alfa))
     theta_max = float(np.max(all_alfa))
     print("minalltheta ", degrees(theta_min), " maxalltheta ", degrees(theta_max))
+
+
+    script_dir = Path(__file__).parent
+    output_dir = script_dir / "images" / "concentric"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for current_theta in np.arange(theta_min, theta_max + 0.001, 0.005):
+        crossings = raw_ray_crossings(int_table_v1, current_theta)
+        plot_raw_ray_folding(
+            crossings, 
+            current_theta, 
+            save_path = output_dir / f"con_{current_theta}.png")
 
     theta_step_rad = radians(theta_step_deg)
     theta_grid     = np.arange(theta_min, theta_max + 1e-9, theta_step_rad)
@@ -444,7 +456,7 @@ def check_ray_monotonicity(int_table,
 
             dpsi_all.append(dpsi)
 
-            if dpsi > fcc_constants.psi_step:
+            if t_b < t_a:
                 violations.append({
                     'ray_index': k,
                     angle_key: degrees(angle_rad),
@@ -551,3 +563,185 @@ def plot_violation_histogram(
         plt.savefig(save_path)
     else:
         plt.show()
+
+def raw_ray_crossings(int_table_v1, ray_angle_rad, angle_column=3):
+    """
+    For ONE fixed ray angle (theta_j for concentric, beta_j for classic),
+    walk every raw trajectory in the psi-launch fan (int_table_v1, the
+    pre-culling Table 1 from interceptor_table()/int_trj_calc -- NOT the
+    already-built ray table) and find where it crosses exactly this angle,
+    with NO earliest-time-per-bucket merging and NO monotonicity filtering
+    applied. This is the raw (psi -> r, t) relationship the table-building
+    step has to summarize into a handful of rows -- if it isn't monotonic in
+    psi, any table row that blends two of these points (because they passed
+    a purely *local* r/t check against whatever was already kept) is mixing
+    two physically disconnected trajectories, regardless of whether the
+    final table looks locally monotonic.
+ 
+    Parameters
+    ----------
+    int_table_v1 : object ndarray
+        Table 1 -- the RAW trajectory fan, one entry per psi_launch, each a
+        (n, 4) array of [psi_deg, time, rv, angle] (angle = alfa for
+        concentric's [3], or the equivalent classic column -- pass whichever
+        this fan actually has via angle_column).
+    ray_angle_rad : float
+        The fixed ray/beam angle to intersect every trajectory against.
+    angle_column : int
+        Which column of each trajectory holds the angle to intersect on
+        (alfa for tables_v2b_a's fan is column 3; check tables_v2b_0's raw
+        fan layout for the classic case and adjust if it differs).
+ 
+    Returns
+    -------
+    crossings : list of (psi_deg, t, r), sorted ascending by psi_deg.
+        Only trajectories whose angle range actually spans ray_angle_rad
+        contribute a point.
+    """
+    crossings = []
+    for traj in int_table_v1:
+        if traj is None or len(traj) < 2:
+            continue
+        angle = traj[:, angle_column]
+        psi_deg = traj[0, 0]
+        for i in range(len(traj) - 1):
+            a1, a2 = angle[i], angle[i + 1]
+            lo, hi = (a1, a2) if a1 <= a2 else (a2, a1)
+            if hi - lo < 1e-14:
+                continue
+            if lo <= ray_angle_rad <= hi:
+                f = (ray_angle_rad - a1) / (a2 - a1)
+                t = traj[i, 1] + f * (traj[i + 1, 1] - traj[i, 1])
+                r = traj[i, 2] + f * (traj[i + 1, 2] - traj[i, 2])
+                crossings.append((float(psi_deg), float(t), float(r)))
+                break  # a single trajectory crosses a given angle once
+                       # (angle is monotonic along one flight); stop after
+                       # the first crossing found
+ 
+    crossings.sort(key=lambda c: c[0])
+    return crossings
+ 
+ 
+def _find_direction_segments(crossings):
+    """
+    Split the psi-sorted crossings into maximal runs where r moves the same
+    direction (non-decreasing, or non-increasing) as psi increases -- the
+    "increasing"/"decreasing" sequences described in the discussion this
+    accompanies. Returns a list of (start_idx, end_idx, direction) with
+    direction in {'increasing', 'decreasing'} (inclusive indices into
+    crossings), plus, for each segment, whether t moved consistently with r
+    (t_consistent=True) or not -- a segment where r increases but t doesn't
+    is exactly the "opposite direction" case called out above.
+    """
+    if len(crossings) < 2:
+        return []
+ 
+    segments = []
+    r = [c[2] for c in crossings]
+    t = [c[1] for c in crossings]
+ 
+    seg_start = 0
+    direction = None  # 'increasing' or 'decreasing'
+ 
+    for i in range(1, len(crossings)):
+        dr = r[i] - r[i - 1]
+        step_dir = 'increasing' if dr >= 0 else 'decreasing'
+        if direction is None:
+            direction = step_dir
+        elif step_dir != direction:
+            segments.append(_make_segment(seg_start, i - 1, direction, r, t))
+            seg_start = i - 1
+            direction = step_dir
+ 
+    segments.append(_make_segment(seg_start, len(crossings) - 1, direction, r, t))
+    return segments
+ 
+ 
+def _make_segment(i0, i1, direction, r, t):
+    dr = r[i1] - r[i0]
+    dt = t[i1] - t[i0]
+    t_consistent = (dt >= 0) if direction == 'increasing' else (dt <= 0)
+    return {'start_idx': i0, 'end_idx': i1, 'direction': direction, 't_consistent': t_consistent}
+ 
+ 
+def plot_raw_ray_folding(crossings, ray_angle_deg, psi_range=None, save_path=None):
+    """
+    Four panels, stacked, all showing the SAME raw crossing points along one
+    fixed ray, just against different independent variables -- so a fold
+    that's ambiguous in one view is unmistakable in another:
+ 
+      1. altitude vs psi   -- r(psi): where the ray crossing moves up/down
+                              as the launch angle sweeps
+      2. time vs psi       -- t(psi): same sweep, arrival time
+      3. psi vs time       -- the inverse view: if this is not single-valued,
+                              one arrival time corresponds to several launch
+                              angles, i.e. interpolating psi from t is not
+                              well-posed
+      4. altitude vs time  -- r(t) along the ray: this is exactly the
+                              (t, r) pair the table-building step sees and
+                              filters on; loops/backtracking here are what
+                              lets a point from a different psi-branch pass
+                              a purely local monotonicity check
+ 
+    Segments are coloured by direction of r vs psi (green = r increasing,
+    red = r decreasing) and dashed where t moves opposite to r within that
+    segment, consistently across all four panels, so the same segment is
+    identifiable in every view.
+ 
+    psi_range : optional (psi_min_deg, psi_max_deg) to zoom in, e.g. (0, 35).
+    """
+    if psi_range is not None:
+        crossings = [c for c in crossings if psi_range[0] <= c[0] <= psi_range[1]]
+ 
+    if len(crossings) < 2:
+        print("Not enough crossings in this psi range to show anything.")
+        return
+ 
+    segments = _find_direction_segments(crossings)
+    psi = [c[0] for c in crossings]
+    t = [c[1] for c in crossings]
+    alt_km = [(c[2]) / 1000.0 for c in crossings]
+ 
+    fig, axes = plt.subplots(2, 2, figsize=(17, 17))
+    ax1, ax2, ax3, ax4 = axes.flatten()
+ 
+    colors = {'increasing': '#2e8b57', 'decreasing': '#c0392b'}
+ 
+    # (x_data, y_data, xlabel, ylabel) per panel
+    panels = [
+        (psi, alt_km, 'launch angle psi, deg',   'altitude at ray crossing, km'),
+        (psi, t,      'launch angle psi, deg',   'time at ray crossing, s'),
+        (t,   psi,    'time at ray crossing, s', 'launch angle psi, deg'),
+        (t,   alt_km, 'time at ray crossing, s', 'altitude at ray crossing, km'),
+    ]
+ 
+    for ax, (xd, yd, xlab, ylab) in zip(axes.flatten(), panels):
+        for seg in segments:
+            i0, i1 = seg['start_idx'], seg['end_idx']
+            c = colors[seg['direction']]
+            style = '-' if seg['t_consistent'] else '--'
+            ax.plot(xd[i0:i1 + 1], yd[i0:i1 + 1], style, color=c, linewidth=2)
+        ax.scatter(xd, yd, s=5, color='black', zorder=0.1)
+        ax.set_xlabel(xlab)
+        ax.set_ylabel(ylab)
+        ax.grid(True, linestyle=':', alpha=0.6)
+ 
+    ax1.set_title('Ray angle = {:.3f} deg  --  {} direction-reversal segment(s)\n'
+                  '(green = r increasing with psi, red = r decreasing; '
+                  'dashed = t moves opposite to r in that segment)'.format(
+                      ray_angle_deg, len(segments)), fontsize=10)
+ 
+    plt.tight_layout()
+ 
+    for i, seg in enumerate(segments):
+        print("  segment {}: psi {:.2f} to {:.2f} deg  ({}, t {}consistent)".format(
+            i, psi[seg['start_idx']], psi[seg['end_idx']], seg['direction'],
+            '' if seg['t_consistent'] else 'NOT '))
+ 
+    if save_path:
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
+        print("Saved to", save_path)
+    else:
+        plt.show()
+ 
+""" End of raw_ray_folding """

@@ -306,11 +306,6 @@ def run_interception_table(i_type, rd_fname='', psi_step=0.25, beta_step=0.1,
         interc_data = run_interceptor_table(i_type, rd_fname, psi_step, keep_int_tables, concentric=concentric)
         interceptor_data, config_data, interc_table = interc_data
  
-    # =================================================================
-    # INTERFACE-WEICHE FÜR ANGLE-OUTER ERWEITERT
-    # =================================================================
-    # Wir übergeben das concentric-Flag an die tables_v2b_a.py weiter, 
-    # um das Invertieren des Gitters (Outer = theta, Inner = h) zu steuern.
     if concentric:
         int_table_v2_w = tb_module.interception_table(interceptor_data, interc_table, psi_step, beta_step, concentric=True)
     else:
@@ -327,23 +322,16 @@ def run_interception_table(i_type, rd_fname='', psi_step=0.25, beta_step=0.1,
         np.save(intab_w, interc_data_w, allow_pickle=True)
     print("The sampled interception table saved to " + file_nw)
     
-    # =================================================================
-    # HARMONISIERTE VERIFIKATION (Vorgabe Punkt 2 & 3)
-    # =================================================================
     if int_table_samp_verify :
         print("Sampled set verification only >>>")
         v_count = 0
         for i in range(len(int_table_v2_w)) :
             for j in range(len(int_table_v2_w[i]) - 1) :
                 if concentric:
-                    # ANGLE-OUTER-REGEL: Da das Gitter nach theta_j aufgeteilt ist,
-                    # müssen im inneren Strahl-Vektor sowohl die Höhe/Radius [j, 2] 
-                    # als auch die Zeit [j, 1] streng monoton ansteigen!
                     if int_table_v2_w[i][j, 1] >= int_table_v2_w[i][j + 1, 1] or \
                        int_table_v2_w[i][j, 2] >= int_table_v2_w[i][j + 1, 2]:
                         v_count += 1
                 else:
-                    # KLASSISCHE REGEL: Sortiert nach Radius (Zeile j, 2 >= j+1, 2)
                     if int_table_v2_w[i][j, 1] >= int_table_v2_w[i][j + 1, 1] or \
                        int_table_v2_w[i][j, 2] >= int_table_v2_w[i][j + 1, 2] :
                         v_count += 1
@@ -353,7 +341,6 @@ def run_interception_table(i_type, rd_fname='', psi_step=0.25, beta_step=0.1,
         else :
             print("Sampled table verification complete, all good. Monotonicity rule holds.")
 
-        # Sicherheits-Check für Winkel-Monotonie der Strahlen-Indizes
         i_v = 0
         while i_v < (len(int_table_v2_w) - 1) :
             while len(int_table_v2_w[i_v]) == 0 :
@@ -362,7 +349,6 @@ def run_interception_table(i_type, rd_fname='', psi_step=0.25, beta_step=0.1,
             while len(int_table_v2_w[j_v]) == 0 : 
                 j_v += 1
             
-            # Index 3 ist in beiden Modellen der Gitter-Führungswinkel (Klassisch: beta, Concentric: theta)
             if int_table_v2_w[i_v][0, 3] >= int_table_v2_w[j_v][0, 3] :
                 print(f"[WARNUNG] Gitter-Inversion bei Index {i_v}: {int_table_v2_w[i_v][0, 3]} >= {int_table_v2_w[j_v][0, 3]}")
             i_v = j_v
@@ -374,7 +360,7 @@ def run_interception_table(i_type, rd_fname='', psi_step=0.25, beta_step=0.1,
 def load_int_table(t_itype, psi_step=0.25, beta_step=0.1, f_name='', t_tstamp='', 
                    keep_int_tables=set_keep_int_tables, 
                    int_table_samp_verify=set_int_table_samp_verify,
-                   concentric=False) : # NEU: concentric Parameter hinzugefügt
+                   concentric=False) :
     """
     Loading sampled interception table from a file. If not found, load set of interceptor trajectories from a file,
     then calculate interception table. If the set is not found either, calculate a new one (time consuming). 
