@@ -15,3 +15,5 @@ The following two are recommended, but not required (the program will work norma
   - **playsound**
 
 Porper manual is coming!
+
+Copyright (c) 2025 tim-kad
